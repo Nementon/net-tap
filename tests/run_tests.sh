@@ -553,6 +553,122 @@ except jsonschema.ValidationError:
             FAILED=$((FAILED + 1))
         fi
 
+        echo -n "[TEST] Validating schema rejection of invalid IP in discovered_hosts... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged'],
+    'discovered_hosts': [
+        {'ip': 'INVALID_NOT_AN_IP', 'mac': '02:00:00:11:22:33', 'vlan': 'untagged'}
+    ]
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject invalid IP in discovered_hosts)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema rejection of invalid IPv6 prefix /999... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['ipv6_prefixes'] = ['2001:db8::/999']
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject out-of-range prefix length /999)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema rejection of negative frame counts... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['qinq_frames'] = -1
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject negative qinq_frames)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema rejection of unauthorized extra property... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['unauthorized_extra_field'] = 'pwn'
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject unauthorized extra property)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        # Corrupt and Truncated PCAP Handling Tests
+        echo -n "[TEST] Verifying analyzer resilience against corrupted PCAP input... "
+        TEST_CORRUPT_DIR=$(mktemp -d /tmp/net-tap-test-corrupt.XXXXXX)
+        echo "NON_PCAP_GARBAGE_RANDOM_DATA" > "${TEST_CORRUPT_DIR}/corrupt.pcap"
+        if "$BIN_PATH" analyze -d "${TEST_CORRUPT_DIR}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (analyzer crashed on corrupt pcap)"
+            FAILED=$((FAILED + 1))
+        fi
+        rm -rf "${TEST_CORRUPT_DIR}"
+
+        echo -n "[TEST] Verifying analyzer resilience against truncated PCAP header... "
+        TEST_TRUNC_DIR=$(mktemp -d /tmp/net-tap-test-trunc.XXXXXX)
+        python3 -c "
+with open('${TEST_TRUNC_DIR}/trunc.pcap', 'wb') as f:
+    f.write(bytes.fromhex('d4c3b2a1020004000000000000000000ffff00000100000000000000000000006400000064000000') + b'short')
+" 2>/dev/null || true
+        if "$BIN_PATH" analyze -d "${TEST_TRUNC_DIR}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (analyzer crashed on truncated pcap)"
+            FAILED=$((FAILED + 1))
+        fi
+        rm -rf "${TEST_TRUNC_DIR}"
+
         # Verify Native tcpdump DPI Fallback (when tshark is absent or bypassed)
         echo -n "[TEST] Validating native tcpdump DPI fallback (tshark absent)... "
         DPI_FALLBACK_JSON=$(PATH="/bin:/usr/local/bin" "$BIN_PATH" analyze -d "$FIXTURES_DIR" --json 2>/dev/null)
@@ -857,6 +973,7 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
 
     TEST_MULTI_DIR=$(mktemp -d /tmp/net-tap-test-multi.XXXXXX)
     assert_success "$BIN_PATH" on -n "${TEST_NS}" -i "veth-tap1,veth-tap2" -o "${TEST_MULTI_DIR}"
+    assert_fail "already part of active monitoring session" "$BIN_PATH" on -n "${TEST_NS}" -i veth-tap1 -o "${TEST_MULTI_DIR}"
 
     echo -n "[TEST] Verifying Netfilter raw table NOTRACK and DROP rules... "
     RAW_IPTABLES=$(ip netns exec "${TEST_NS}" iptables -t raw -S 2>/dev/null || true)
@@ -973,7 +1090,7 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
     # Start responder on veth-peer in python
     ip netns exec "${TEST_NS}" python3 -c "
 import sys, time
-from scapy.all import sniff, sendp, Ether, Dot1Q, ARP, IP, ICMP, TCP, UDP, BOOTP, DHCP
+from scapy.all import sniff, sendp, Ether, Dot1Q, ARP, IP, IPv6, ICMP, TCP, UDP, BOOTP, DHCP, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6EchoRequest, Raw
 
 def process_pkt(pkt):
     reply = None
@@ -987,10 +1104,17 @@ def process_pkt(pkt):
     elif pkt.haslayer(ICMP) and pkt[ICMP].type == 8:
         reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src=pkt[IP].dst, dst=pkt[IP].src) / ICMP(type=0, id=pkt[ICMP].id, seq=pkt[ICMP].seq)
     elif pkt.haslayer(TCP) and pkt[TCP].flags == 'S':
-        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src=pkt[IP].dst, dst=pkt[IP].src) / TCP(sport=pkt[TCP].dport, dport=pkt[TCP].sport, flags='SA', seq=1000, ack=pkt[TCP].seq+1)
+        if pkt.haslayer(IPv6):
+            reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IPv6(src=pkt[IPv6].dst, dst=pkt[IPv6].src) / TCP(sport=pkt[TCP].dport, dport=pkt[TCP].sport, flags='SA', seq=1000, ack=pkt[TCP].seq+1)
+        elif pkt.haslayer(IP):
+            reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src=pkt[IP].dst, dst=pkt[IP].src) / TCP(sport=pkt[TCP].dport, dport=pkt[TCP].sport, flags='SA', seq=1000, ack=pkt[TCP].seq+1)
     elif pkt.haslayer(DHCP) and pkt.haslayer(BOOTP):
         bootp = pkt[BOOTP]
         reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src='192.0.2.254', dst='255.255.255.255') / UDP(sport=67, dport=68) / BOOTP(op=2, yiaddr='192.0.2.50', siaddr='192.0.2.254', chaddr=bootp.chaddr, xid=bootp.xid) / DHCP(options=[('message-type', 'offer'), ('server_id', '192.0.2.254'), 'end'])
+    elif pkt.haslayer(ICMPv6ND_NS):
+        reply = Ether(src='02:00:00:88:99:bb', dst=pkt[Ether].src) / IPv6(src='2001:db8::1', dst=pkt[IPv6].src) / ICMPv6ND_NA(tgt='2001:db8::1', R=1, S=1, O=1)
+    elif pkt.haslayer(ICMPv6EchoRequest):
+        reply = Ether(src='02:00:00:88:99:bb', dst=pkt[Ether].src) / IPv6(src=pkt[IPv6].dst, dst=pkt[IPv6].src) / Raw(load=b'pong')
 
     if reply is not None:
         sendp(reply, iface='veth-peer', count=1, verbose=0)
@@ -1007,6 +1131,11 @@ sniff(iface='veth-peer', timeout=10, prn=process_pkt)
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --dhcp-discover
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --icmp-pmtu 192.0.2.99
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --tcp-syn 192.0.2.99 -p 80,443
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --ndp-scan 2001:db8::1 --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --ndp-scan all-routers --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --dhcp-discover6
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --icmp-pmtu 2001:db8::1
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --tcp-syn 2001:db8::1 -p 80,443
 
     kill "${RESP_PID}" 2>/dev/null || true
     wait "${RESP_PID}" 2>/dev/null || true
@@ -1036,8 +1165,10 @@ try:
     jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
     assert 'active_audit' in data
     assert data['active_audit']['probes_sent'] > 0
-    assert data['active_audit']['responses_received'] >= 2
-    assert len(data['active_audit']['discovered_hosts']) >= 2
+    assert data['active_audit']['responses_received'] >= 3
+    assert len(data['active_audit']['discovered_hosts']) >= 3
+    discovered_ips = [h['ip'] for h in data['active_audit']['discovered_hosts']]
+    assert '2001:db8::1' in discovered_ips
     sys.exit(0)
 except Exception as e:
     sys.stderr.write(f'Validation failed: {e}\n')
@@ -1055,6 +1186,7 @@ except Exception as e:
     ACTIVE_TXT=$("$BIN_PATH" analyze -d "${TEST_ACTIVE_DIR}" 2>/dev/null || echo "")
     if echo "${ACTIVE_TXT}" | grep -q "\[7\] ACTIVE AUDIT & TARGET PROBING CORRELATION" && \
        echo "${ACTIVE_TXT}" | grep -q "192.0.2.99" && \
+       echo "${ACTIVE_TXT}" | grep -q "2001:db8::1" && \
        echo "${ACTIVE_TXT}" | grep -q "10.100.1.1"; then
         echo "PASSED"
         PASSED=$((PASSED + 1))

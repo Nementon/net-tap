@@ -242,6 +242,31 @@ frag_id = 0xbeef
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254", id=frag_id, flags="MF", frag=0) / UDP(sport=8888, dport=8888, len=108) / Raw(load=b"A"*80))
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254", id=frag_id, flags=0, frag=11) / Raw(load=b"B"*20))
 
+# 26. PPPoE Discovery Stage (PADI: Active Discovery Initiation - 0x8863)
+pppoe_padi = b"\x11\x09\x00\x00\x00\x04\x01\x01\x00\x00"
+packets.append(Ether(src="02:00:00:00:00:01", dst="ff:ff:ff:ff:ff:ff", type=0x8863) / Raw(load=pppoe_padi))
+
+# 26b. PPPoE Session Stage (0x8864) encapsulating IPv4
+pppoe_sess = b"\x11\x00\x00\x01\x00\x2c\x00\x21" + b"\x45\x00\x00\x28\x00\x01\x00\x00\x40\x06\x00\x00\x0a\x01\x01\x01\x0a\x01\x01\x02"
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe", type=0x8864) / Raw(load=pppoe_sess))
+
+# 27. LACP (IEEE 802.3ad Slow Protocols - 0x8809, Subtype 1)
+lacp_raw = b"\x01\x01\x01\x14\x80\x00\x02\x00\x00\x00\x00\x01\x00\x01\x80\x00\x00\x01\x3d\x00\x02\x14\x80\x00\x02\x00\x00\x00\x00\x02\x00\x01\x80\x00\x00\x01\x3d\x00\x03\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+packets.append(Ether(src="02:00:00:00:00:01", dst="01:80:c2:00:00:02", type=0x8809) / Raw(load=lacp_raw))
+
+# 28. SSH Protocol Banner Exchange (Port 22)
+ssh_banner = b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.7\r\n"
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=55000, dport=22, flags="PA") / Raw(load=ssh_banner))
+
+# 29. HTTP/1.1 Request (Port 80)
+http_get = b"GET /carrier/status HTTP/1.1\r\nHost: api.internal.network\r\nUser-Agent: NetTap-Probe/1.0\r\n\r\n"
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=54321, dport=80, flags="PA") / Raw(load=http_get))
+
+# Ensure monotonic timestamps across packet sequence
+base_time = 1700000000.0
+for idx, pkt in enumerate(packets):
+    pkt.time = base_time + idx * 0.05
+
 # Resolve output path dynamically
 script_dir = os.path.dirname(os.path.abspath(__file__))
 output_file = os.path.join(script_dir, "fixtures", "synthetic_carrier_trace.pcap")

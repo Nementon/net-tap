@@ -18,7 +18,7 @@ run_probe() {
     fi
 
     if [[ -z "${PROBE_TYPE:-}" ]]; then
-        log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --icmp-pmtu, --tcp-syn)."
+        log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --dhcp-discover6, --icmp-pmtu, --tcp-syn)."
         exit 1
     fi
 
@@ -60,9 +60,9 @@ run_probe() {
             [[ -f "${pf}" ]] || continue
             local v=""
             if [[ "${pf}" =~ \.gz$ ]]; then
-                v=$(gzip -dc "${pf}" 2>/dev/null | tcpdump -nn -e -r - 2>/dev/null | awk '/vlan [0-9]+/ {for(i=1;i<=NF;i++) if ($i=="vlan") print $(i+1)}' || true)
+                v=$(gzip -dc "${pf}" 2>/dev/null | tcpdump -nn -e -r - 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
             else
-                v=$(tcpdump -nn -e -r "${pf}" 2>/dev/null | awk '/vlan [0-9]+/ {for(i=1;i<=NF;i++) if ($i=="vlan") print $(i+1)}' || true)
+                v=$(tcpdump -nn -e -r "${pf}" 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
             fi
             if [[ -n "${v}" ]]; then
                 discovered_vlans="${discovered_vlans}"$'\n'"${v}"

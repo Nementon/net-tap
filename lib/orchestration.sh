@@ -278,8 +278,8 @@ start_tap() {
             for pid in "${PIDS_TCPDUMP[@]:-}"; do [[ -n "$pid" ]] && safe_kill "$pid" "tcpdump" "tcpdump"; done
             for pid in "${PIDS_DMESG[@]:-}"; do [[ -n "$pid" ]] && safe_kill "$pid" "dmesg" "dmesg"; done
             for pid in "${PIDS_IPMON[@]:-}"; do [[ -n "$pid" ]] && safe_kill "$pid" "ip" "ip.*monitor"; done
-            [[ -n "${PID_AUTOSHUTDOWN}" ]] && safe_kill "${PID_AUTOSHUTDOWN}" "bash|net-tap|net-tap.sh" "_autoshutdown_worker"
-            [[ -n "${PID_WATCHDOG}" ]] && safe_kill "${PID_WATCHDOG}" "bash|net-tap|net-tap.sh" "_disk_watchdog_worker"
+            [[ -n "${PID_AUTOSHUTDOWN}" ]] && safe_kill "${PID_AUTOSHUTDOWN}" "bash|net-tap|net-tap.sh" "_autoshutdown_worker|net-tap.*(-i|on)"
+            [[ -n "${PID_WATCHDOG}" ]] && safe_kill "${PID_WATCHDOG}" "bash|net-tap|net-tap.sh" "_disk_watchdog_worker|net-tap.*(-i|on)"
             release_lock
         fi
     }
@@ -556,9 +556,13 @@ start_tap() {
             done
         }
 
-        ( _close_lock_fds; exec dmesg -wT ) > "${DMESG_LOG}" 2>&1 &
-        local PID_DMESG=$!
-        PIDS_DMESG+=("${PID_DMESG}")
+        if [[ -z "${NETNS}" ]]; then
+            ( _close_lock_fds; exec dmesg -wT ) > "${DMESG_LOG}" 2>&1 &
+            local PID_DMESG=$!
+            PIDS_DMESG+=("${PID_DMESG}")
+        else
+            echo "[INFO] Running inside network namespace '${NETNS}'; host-wide dmesg capture disabled to maintain multi-tenant isolation." > "${DMESG_LOG}"
+        fi
 
         if [[ -n "${NETNS}" ]]; then
             ( _close_lock_fds; exec ip netns exec "${NETNS}" ip monitor link dev "${iface}" ) > "${LINK_LOG}" 2>&1 &
@@ -739,8 +743,8 @@ stop_tap() {
         for pid in "${PIDS_TCPDUMP[@]:-}"; do [[ -n "$pid" ]] && safe_kill "$pid" "tcpdump" "tcpdump"; done
         for pid in "${PIDS_DMESG[@]:-}"; do [[ -n "$pid" ]] && safe_kill "$pid" "dmesg" "dmesg"; done
         for pid in "${PIDS_IPMON[@]:-}"; do [[ -n "$pid" ]] && safe_kill "$pid" "ip" "ip.*monitor"; done
-        [[ -n "${PID_AUTOSHUTDOWN:-}" ]] && safe_kill "${PID_AUTOSHUTDOWN}" "bash|net-tap|net-tap.sh" "_autoshutdown_worker"
-        [[ -n "${PID_WATCHDOG:-}" ]] && safe_kill "${PID_WATCHDOG}" "bash|net-tap|net-tap.sh" "_disk_watchdog_worker"
+        [[ -n "${PID_AUTOSHUTDOWN:-}" ]] && safe_kill "${PID_AUTOSHUTDOWN}" "bash|net-tap|net-tap.sh" "_autoshutdown_worker|net-tap.*(-i|on)"
+        [[ -n "${PID_WATCHDOG:-}" ]] && safe_kill "${PID_WATCHDOG}" "bash|net-tap|net-tap.sh" "_disk_watchdog_worker|net-tap.*(-i|on)"
         rm -f "${STATE_FILE}" 2>/dev/null || true
         release_lock
         exit 130
@@ -773,10 +777,10 @@ stop_tap() {
     NETNS="${NETNS:-}"
 
     if [[ -n "${PID_WATCHDOG:-}" && "${PID_WATCHDOG}" -ne $$ && "${PID_WATCHDOG}" -ne "${PPID}" ]]; then
-        safe_kill "${PID_WATCHDOG}" "bash|net-tap|net-tap.sh" "_disk_watchdog_worker"
+        safe_kill "${PID_WATCHDOG}" "bash|net-tap|net-tap.sh" "_disk_watchdog_worker|net-tap.*(-i|on)"
     fi
     if [[ -n "${PID_AUTOSHUTDOWN:-}" && "${PID_AUTOSHUTDOWN}" -ne $$ && "${PID_AUTOSHUTDOWN}" -ne "${PPID}" ]]; then
-        safe_kill "${PID_AUTOSHUTDOWN}" "bash|net-tap|net-tap.sh" "_autoshutdown_worker"
+        safe_kill "${PID_AUTOSHUTDOWN}" "bash|net-tap|net-tap.sh" "_autoshutdown_worker|net-tap.*(-i|on)"
     fi
 
     # Send SIGTERM in parallel to all capture processes to minimize Tx/Rx capture skew

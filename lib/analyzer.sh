@@ -603,7 +603,7 @@ analyze_session() {
         local tshark_retrans=0
         for pf in "${files_to_analyze[@]}"; do
             local rc
-            rc=$(tshark -r "${pf}" -Y "tcp.analysis.retransmission" 2>/dev/null | wc -l || echo "0")
+            rc=$( (tshark -r "${pf}" -Y "tcp.analysis.retransmission" 2>/dev/null || true) | wc -l)
             tshark_retrans=$((tshark_retrans + rc))
         done
         if [[ ${tshark_retrans} -gt ${tcp_retrans} ]]; then
@@ -781,23 +781,29 @@ vlans_probed = sorted(list(vlans_probed_set), key=lambda x: (x != "untagged", in
 responses_received = 0
 discovered_hosts_dict = {}
 
+current_vlan = "untagged"
 if os.path.exists(dump_path):
     with open(dump_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             vlan_match = re.search(r"\bvlan\s+(\d+)\b", line)
-            pkt_vlan = vlan_match.group(1) if vlan_match else "untagged"
+            if vlan_match:
+                current_vlan = vlan_match.group(1)
+            elif not line.startswith(" ") and not line.startswith("\t"):
+                current_vlan = "untagged"
+            pkt_vlan = current_vlan
 
             arp_match = re.search(r"Reply\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+is-at\s+([0-9a-fA-F:]{17})", line)
             if arp_match:
                 ip = arp_match.group(1)
                 mac = arp_match.group(2).lower()
-                responses_received += 1
-                key = (ip, pkt_vlan)
-                if key not in discovered_hosts_dict:
-                    discovered_hosts_dict[key] = mac
+                if not probed_ips or ip in probed_ips:
+                    responses_received += 1
+                    key = (ip, pkt_vlan)
+                    if key not in discovered_hosts_dict:
+                        discovered_hosts_dict[key] = mac
                 continue
 
-            if "ICMP echo reply" in line or "need to frag" in line or "packet too big" in line:
+            if "ICMP echo reply" in line or "need to frag" in line or "packet too big" in line or "echo reply" in line:
                 responses_received += 1
                 continue
 
@@ -812,6 +818,10 @@ if os.path.exists(dump_path):
                 responses_received += 1
                 continue
 
+            if "DHCPv6" in line and ("reply" in line.lower() or "advertise" in line.lower()):
+                responses_received += 1
+                continue
+
             if "Flags [S.]" in line or "Flags [R" in line:
                 for ip in probed_ips:
                     if ip and f"{ip}." in line:
@@ -821,6 +831,17 @@ if os.path.exists(dump_path):
 
             if "neighbor advertisement" in line:
                 responses_received += 1
+                tgt_m = re.search(r"tgt\s+is\s+([0-9a-fA-F:]+)", line)
+                mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line)
+                if not mac_m:
+                    mac_m = re.search(r">\s+([0-9a-fA-F:]{17})", line)
+                if tgt_m:
+                    tgt_ip = tgt_m.group(1).lower()
+                    if not probed_ips or tgt_ip in probed_ips:
+                        tgt_mac = mac_m.group(1).lower() if mac_m else "unknown"
+                        key = (tgt_ip, pkt_vlan)
+                        if key not in discovered_hosts_dict:
+                            discovered_hosts_dict[key] = tgt_mac
                 continue
 
 discovered_hosts = [

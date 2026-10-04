@@ -166,6 +166,10 @@ main() {
                 PROBE_TYPE="dhcp"
                 shift
                 ;;
+            --dhcp-discover6|--dhcp6-discover)
+                PROBE_TYPE="dhcp6"
+                shift
+                ;;
             --icmp-pmtu)
                 PROBE_TYPE="pmtu"
                 if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
@@ -288,7 +292,7 @@ main() {
             exit 1
         fi
         if [[ -z "${PROBE_TYPE}" ]]; then
-            log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --icmp-pmtu, --tcp-syn)."
+            log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --dhcp-discover6, --icmp-pmtu, --tcp-syn)."
             exit 1
         fi
         if ! [[ "${PROBE_RATE}" =~ ^[1-9][0-9]*$ ]]; then
@@ -346,7 +350,7 @@ main() {
         fi
     fi
 
-    if [[ "${ACTION}" != "on" && -n "${safe_iface}" && ! -f "${STATE_FILE}" ]]; then
+    if [[ -n "${safe_iface}" && ! -f "${STATE_FILE}" ]]; then
         # Search for multi-interface state files containing this interface or any constituent
         for f in "${STATE_DIR}"/*.state; do
             [[ -f "$f" ]] || continue
@@ -370,6 +374,10 @@ main() {
             for req_i in "${req_if_arr[@]}"; do
                 for i in "${if_arr[@]}"; do
                     if [[ "$i" == "$req_i" ]]; then
+                        if [[ "${ACTION}" == "on" ]]; then
+                            log_err "Interface '${req_i}' is already part of active monitoring session '${basename_f}'."
+                            exit 1
+                        fi
                         STATE_FILE="$f"
                         # Update IFACE to the full multi-interface list so stop/status affects the whole session
                         IFACE="$ifaces_part"

@@ -2,14 +2,18 @@
   <img src="assets/logo.jpg" alt="net-tap logo" width="300" />
 </div>
 
-# Net-Tap: Passive Profiler & Zero-Egress Tap
+# Net-Tap: Carrier-Grade Stealth Tap & Active Telemetry Suite
 
 ![Platform](https://img.shields.io/badge/Platform-Linux-blue)
 ![ShellCheck](https://img.shields.io/badge/ShellCheck-Passing-brightgreen)
 [![CI](https://github.com/Nementon/net-tap/actions/workflows/ci.yml/badge.svg)](https://github.com/Nementon/net-tap/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/License-Beerware-orange)
 
-`net-tap` is an automated, network intelligence and passive packet tapping tool for Linux. It securely provisions physical or virtual interfaces into a guaranteed zero-egress promiscuous capture state, manages ring-buffered packet captures with storage protection, and executes deep protocol analysis to instantly map complex dual-stack (IPv4/IPv6) enterprise and telecommunications networks.
+`net-tap` is an automated, carrier-grade network intelligence, stealth packet tapping, and active telemetry suite for Linux. It securely provisions physical or virtual interfaces into a **guaranteed zero-egress promiscuous capture state** (for passive monitoring) or a **watermarked selective-egress state** (for controlled active auditing), manages high-performance ring-buffered packet captures with proactive storage protection, and executes deep protocol analysis to instantly map complex dual-stack (IPv4/IPv6) enterprise and telecommunications networks.
+
+### Two Operating Modes:
+* **Passive Stealth Mode (default)**: Enforces an unconditional hardware and kernel egress lock (via `tc clsact`, Netfilter `raw` drops, and 36 non-destructive sysctls) guaranteeing **0 outbound bytes** leak onto the monitored wire while capturing full line-rate traffic.
+* **Active Probing Mode (`--mode active`)**: Combines continuous passive recording with precision active auditing (`--arp-scan`, `--ndp-scan`, `--dhcp-discover`, `--dhcp-discover6`, `--icmp-pmtu`, `--tcp-syn`). Outbound probes are strictly tagged with watermarks (`0x7a9` / 1961), while all spontaneous host OS chatter (such as unsolicited kernel TCP RSTs or IPv6 SLAAC/DAD packets) is completely blocked at the kernel egress gate.
 
 ---
 
@@ -18,6 +22,7 @@
 - [Concept Overview](#concept-overview)
 - [Key Features](#key-features)
   - [Hardware & Data Path Stealth](#hardware--data-path-stealth)
+  - [Controlled Active Auditing & Selective Egress](#controlled-active-auditing--selective-egress)
   - [High-Performance Capture & Buffer Safety](#high-performance-capture--buffer-safety)
   - [Dual-Stack & Deep Protocol Inspection (DPI)](#dual-stack--deep-protocol-inspection-dpi)
 - [Privilege Model & Security](#privilege-model--security)
@@ -37,13 +42,16 @@
     - [Architecture & Selective Egress (Watermark 1961)](#architecture--selective-egress-watermark-1961)
     - [Probe 1: ARP Subnet Discovery](#probe-1-arp-subnet-discovery)
     - [Probe 2: IPv6 NDP Discovery (RS & NS)](#probe-2-ipv6-ndp-discovery-rs--ns)
-    - [Probe 3: RFC 2131 DHCP Discovery](#probe-3-rfc-2131-dhcp-discovery)
+    - [Probe 3: DHCP Discovery (RFC 2131 DHCPv4 & RFC 8415 DHCPv6)](#probe-3-dhcp-discovery-rfc-2131-dhcpv4--rfc-8415-dhcpv6)
     - [Probe 4: Stepped Path MTU Discovery (PMTUD)](#probe-4-stepped-path-mtu-discovery-pmtud)
     - [Probe 5: Lightweight TCP SYN Probing](#probe-5-lightweight-tcp-syn-probing)
     - [Smart Passive-to-Active Discovery (--auto-vlans)](#smart-passive-to-active-discovery---auto-vlans)
 - [Sample Analysis Output](#sample-analysis-output)
   - [Human-Readable Terminal Dashboard](#human-readable-terminal-dashboard)
   - [Structured JSON Export Schema](#structured-json-export-schema)
+- [Session Artifacts Inventory](#session-artifacts-inventory)
+- [Exit Codes Reference](#exit-codes-reference)
+- [Operating System & NetworkManager Coexistence](#operating-system--networkmanager-coexistence)
 - [Testing & Quality Assurance](#testing--quality-assurance)
 - [Troubleshooting](#troubleshooting)
 - [Disclaimer & License](#disclaimer--license)
@@ -76,6 +84,7 @@ net-tap analyze -d /data/trace
 | Operational Challenge | How `net-tap` Solves It |
 | :--- | :--- |
 | **True Zero-Egress Stealth** | Traditional promiscuous mode still permits the host OS to transmit frames (IPv6 SLAAC/DAD, ARP announcements, LLDP/IGMP). These transmissions trip switchport security (MAC limits, 802.1X, BPDU guard) and immediately shut down production links. `net-tap` attaches a kernel `clsact` Traffic Control (`tc`) `matchall` drop filter (priority 1) and Netfilter raw `OUTPUT` drop rules, disables hardware firmware LLDP (`disable-fw-lldp on`), enables `rx-all on` and `rx-vlan-filter off`, sets `txqueuelen 0`, and leaves interfaces administratively `DOWN` on teardown to guarantee **zero outbound bytes** hit the wire, verified via kernel drop counters upon teardown. |
+| **Selective Egress & Active Watermarking** | Traditional active scanning tools trigger IDS alarms and alert remote firewalls by leaking unprompted kernel TCP RSTs and OS chatter. In `--mode active`, `net-tap` configures a selective kernel egress filter (`tc filter ... fwmark 0x7a9 pass` followed by `matchall drop`) that strictly permits authorized, watermarked probe frames (IPv4 IP ID `0x07a9`, IPv6 Flow Label `0x007a9`, ICMP Echo ID `1961`, socket mark `0x7a9`) while dropping 100% of host OS background chatter. |
 | **Non-Destructive Stealth Sysctls (36 Total)** | Naively setting `disable_ipv6=1` purges static and autoconfigured IPv6 addresses permanently. `net-tap` NEVER sets `disable_ipv6=1`. Instead, it applies 36 non-destructive stealth sysctls across IPv4 and IPv6: IPv6 (`keep_addr_on_down=1`, `addr_gen_mode=1`, `use_tempaddr=0`, `enhanced_dad=0`, `ndisc_notify=0`, `accept_redirects=0`, `router_solicitations=0`, `accept_dad=0`, `dad_transmits=0`, `accept_ra=0`, `autoconf=0`, `mldv1_unsolicited_report_interval=0`, `mldv2_unsolicited_report_interval=0`, `force_mld_version=2`, `drop_unsolicited_na=1`, `accept_untracked_na=0`, `forwarding=0`, `mc_forwarding=0`) and IPv4 (`arp_ignore=8`, `arp_announce=2`, `arp_filter=1`, `arp_notify=0`, `drop_gratuitous_arp=1`, `arp_accept=0`, `proxy_arp=0`, `proxy_arp_pvlan=0`, `send_redirects=0`, `accept_redirects=0`, `secure_redirects=0`, `drop_unicast_in_l2_multicast=1`, `igmpv2_unsolicited_report_interval=0`, `igmpv3_unsolicited_report_interval=0`, `force_igmp_version=3`, `forwarding=0`, `mc_forwarding=0`, `bc_forwarding=0`), faithfully restoring all original values (and interface operstate) on exit. |
 | **Connection Tracking (`conntrack`) Protection** | Mirrored line-rate SPAN traffic quickly overwhelms the Netfilter state table, causing kernel memory exhaustion and dropping legitimate host traffic. `net-tap` installs raw `PREROUTING` and `OUTPUT` `NOTRACK` rules in `iptables` and `ip6tables` to bypass connection tracking entirely. |
 | **Microburst Loss & Ring-Buffer Protection** | High-speed links easily drop packets at the socket buffer or fill physical drives. `net-tap` dynamically maximizes hardware Rx descriptor rings to the NIC's preset maximum (via `ethtool -g`, falling back to 4096), provisions a 64 MB `libpcap` buffer (`-B 65536`), disables all 6 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, `rxvlan`) to preserve exact frame boundaries, enables nanosecond timestamping (`--time-stamp-precision nano`), and enforces strict rotating chunk limits with active 1-second filesystem threshold monitoring. |
@@ -148,6 +157,12 @@ flowchart LR
 * **Elevated Jumbo MTU (up to 9216)**: Automatically elevates the interface MTU up to 9216 bytes (or driver max MTU, minimum 9000) during capture to prevent the kernel from dropping 802.1Q tagged frames, QinQ double-tagged frames, or encapsulated overlay packets.
 * **Complete Hardware Offload Neutralization**: Temporarily disables all 6 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, and `rxvlan`) during capture so packet boundaries and timestamps remain unaltered, restoring each offload, PAUSE flow control, and EEE on teardown.
 * **Administrative DOWN Teardown Protection**: When unbinding from a tapped link, the interface is restored and left administratively `DOWN` to prevent temporal kernel emission spikes (DAD, MLDv2, ARP) onto live customer links.
+
+### Controlled Active Auditing & Selective Egress
+* **Watermark 1961 (0x7a9) Egress Gatekeeping**: In `--mode active`, `tc clsact` allows only probe frames stamped with `SO_MARK 0x7a9`, dropping 100% of host OS emissions (including kernel-generated TCP RST packets on unsolicited SYN-ACK responses).
+* **Dual-Stack Active Probing Engine**: Synthesizes raw Layer 2/3 frames without binding host IP addresses: ARP subnet sweeps, intelligent IPv6 NDP scans (CIDR prefix sampling, router solicitations `ff02::2`, all-nodes `ff02::1`, and solicited-node multicast), RFC 2131 DHCP Discover, RFC 8415 DHCPv6 Solicit, stepped envelope PMTU discovery (IPv4 & IPv6), and lightweight TCP SYN probing.
+* **Passive-to-Active VLAN Automation (`--auto-vlans`)**: Inspects passive capture buffers on trunk links to dynamically extract active 802.1Q tags and sweeps probes across all discovered VLANs sequentially.
+* **Hermetic Audit Correlation**: Emits structured JSONL audit logs with timestamps, sequence numbers, and packet metadata, which `net-tap analyze` cross-references with PCAP ring buffers to correlate live responses.
 
 ### High-Performance Capture & Buffer Safety
 * **Dynamic Hardware Descriptor Maximization**: Queries NIC preset maximums via `ethtool -g <iface>` and configures the maximum Rx descriptors (falling back to 4096).

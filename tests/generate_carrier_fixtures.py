@@ -47,9 +47,9 @@ packets.append(Ether(src="00:11:22:33:44:55", dst="01:00:0c:cc:cc:cc") / LLC(dsa
 # 4. Spanning Tree Protocol (STP BPDU)
 packets.append(Dot3(src="00:11:22:33:44:55", dst="01:80:c2:00:00:00") / LLC(dsap=0x42, ssap=0x42, ctrl=3) / STP())
 
-# 5. Security: IEEE 802.1X EAPOL (0x888e)
-eapol_start = b"\x01\x01\x00\x00"  # Version 1, Type 1 (Start)
-packets.append(Ether(src="02:00:00:00:00:aa", dst="01:80:c2:00:00:03", type=0x888e) / Raw(load=eapol_start))
+# 5. Security: IEEE 802.1X EAPOL (0x888e) - EAP-Request/Identity (RFC 3748)
+eapol_req = b"\x01\x00\x00\x05\x01\x01\x00\x05\x01"  # Version 1, Type 0 (EAP-Packet), Len 5, Code 1 (Request), Id 1, Len 5, Type 1 (Identity)
+packets.append(Ether(src="02:00:00:00:00:aa", dst="01:80:c2:00:00:03", type=0x888e) / Raw(load=eapol_req))
 
 # 6. IPv6 SLAAC Router Advertisement (RFC 4861) with MTU and RDNSS options
 ra = (

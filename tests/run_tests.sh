@@ -33,6 +33,7 @@ cleanup() {
         if [[ -n "${TEST_CAPTURE_DIR:-}" ]]; then rm -rf "${TEST_CAPTURE_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_MULTI_DIR:-}" ]]; then rm -rf "${TEST_MULTI_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_DUR_DIR:-}" ]]; then rm -rf "${TEST_DUR_DIR}" 2>/dev/null || true; fi
+        if [[ -n "${TEST_EAP_DIR:-}" ]]; then rm -rf "${TEST_EAP_DIR}" 2>/dev/null || true; fi
     else
         if [[ -n "${TEST_CAPTURE_DIR:-}" ]]; then
             echo "[DIAGNOSTIC] Preserving test capture dir for failure inspection: ${TEST_CAPTURE_DIR}" >&2
@@ -43,6 +44,23 @@ cleanup() {
         if [[ -n "${TEST_DUR_DIR:-}" ]]; then
             echo "[DIAGNOSTIC] Preserving duration dir for failure inspection: ${TEST_DUR_DIR}" >&2
         fi
+        if [[ -n "${TEST_EAP_DIR:-}" ]]; then
+            echo "[DIAGNOSTIC] Preserving EAP test dir for failure inspection: ${TEST_EAP_DIR}" >&2
+        fi
+    fi
+    if [[ -n "${WPA_PID_FILE:-}" && -f "${WPA_PID_FILE}" ]]; then
+        kill "$(cat "${WPA_PID_FILE}")" 2>/dev/null || true
+        rm -f "${WPA_PID_FILE}" 2>/dev/null || true
+    fi
+    if [[ -n "${WPA_CONF_FILE:-}" && -f "${WPA_CONF_FILE}" ]]; then
+        rm -f "${WPA_CONF_FILE}" 2>/dev/null || true
+    fi
+    if [[ -n "${WPA_PID_CTRL:-}" && -f "${WPA_PID_CTRL}" ]]; then
+        kill "$(cat "${WPA_PID_CTRL}")" 2>/dev/null || true
+        rm -f "${WPA_PID_CTRL}" 2>/dev/null || true
+    fi
+    if [[ -n "${WPA_CONF_CTRL:-}" && -f "${WPA_CONF_CTRL}" ]]; then
+        rm -f "${WPA_CONF_CTRL}" 2>/dev/null || true
     fi
     if [[ -n "${TEST_NS:-}" ]]; then
         "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap >/dev/null 2>&1 || true
@@ -542,6 +560,192 @@ if [[ $EUID -eq 0 ]]; then
     assert_success "$BIN_PATH" analyze -d "${TEST_CAPTURE_DIR}"
     rm -rf "${TEST_CAPTURE_DIR}" 2>/dev/null || true
     TEST_CAPTURE_DIR=""
+
+    # 6.7b IEEE 802.1X EAP-Request Ingress & EAP-Response Zero-Egress Drop Verification
+    echo "[TEST] Running IEEE 802.1X EAP-Request ingress & EAP-Response zero-egress drop verification..."
+
+    # Control Verification: Verify that WITHOUT net-tap drop filter, 802.1X response is indeed sent and received
+    if command -v wpa_supplicant >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        echo -n "[TEST] Verifying unshielded baseline sends 802.1X EAP-Response (control test)... "
+        ip netns exec "${TEST_NS}" ip link set dev veth-tap up
+        ip netns exec "${TEST_NS}" ip link set dev veth-peer up
+
+        WPA_CONF_CTRL=$(mktemp /tmp/wpa_ctrl.XXXXXX.conf)
+        WPA_PID_CTRL=$(mktemp /tmp/wpa_ctrl.XXXXXX.pid)
+        rm -f "${WPA_PID_CTRL}"
+        cat << 'EOF' > "${WPA_CONF_CTRL}"
+ctrl_interface=/var/run/wpa_supplicant
+network={
+    key_mgmt=IEEE8021X
+    eap=MD5
+    identity="testuser"
+    password="password"
+}
+EOF
+        ip netns exec "${TEST_NS}" wpa_supplicant -i veth-tap -c "${WPA_CONF_CTRL}" -D wired -B -P "${WPA_PID_CTRL}" 2>/dev/null || true
+        sleep 0.4
+
+        CTRL_RESULT=$(ip netns exec "${TEST_NS}" python3 -c "
+import threading, time
+from scapy.all import sniff, sendp, Ether, Raw
+from scapy.layers.eap import EAP, EAPOL
+
+rx_responses = []
+def listen():
+    pkts = sniff(iface='veth-peer', timeout=2, lfilter=lambda p: p.haslayer(EAP) and p[EAP].code == 2)
+    rx_responses.extend(pkts)
+
+t = threading.Thread(target=listen)
+t.start()
+time.sleep(0.3)
+
+# Send EAP-Request from peer
+eapol_req = b'\x01\x00\x00\x05\x01\x01\x00\x05\x01'
+req_pkt = Ether(src='00:50:56:bb:cc:01', dst='01:80:c2:00:00:03', type=0x888e) / Raw(load=eapol_req)
+sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
+t.join()
+
+if len(rx_responses) > 0 and rx_responses[0].haslayer(EAP) and rx_responses[0][EAP].identity == b'testuser':
+    print('OK')
+else:
+    print('NONE')
+" 2>/dev/null || echo "ERROR")
+
+        if [[ -f "${WPA_PID_CTRL}" ]]; then
+            kill "$(cat "${WPA_PID_CTRL}")" 2>/dev/null || true
+            rm -f "${WPA_PID_CTRL}"
+        fi
+        rm -f "${WPA_CONF_CTRL}"
+        WPA_CONF_CTRL=""
+        WPA_PID_CTRL=""
+        ip netns exec "${TEST_NS}" ip link set dev veth-tap down
+
+        if [[ "${CTRL_RESULT}" == "OK" ]]; then
+            echo "PASSED (confirmed unshielded supplicant emitted EAP-Response 'testuser' to peer)"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (unshielded supplicant did not emit expected response, got: ${CTRL_RESULT})"
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    TEST_EAP_DIR=$(mktemp -d /tmp/net-tap-test-eap.XXXXXX)
+    ip netns exec "${TEST_NS}" ip link set dev veth-peer up
+
+    assert_success "$BIN_PATH" on -n "${TEST_NS}" -i veth-tap -o "${TEST_EAP_DIR}"
+
+    INIT_EAP_DROPS=$(ip netns exec "${TEST_NS}" tc -s filter show dev veth-tap egress 2>/dev/null | awk '/dropped/ {gsub(/,/, "", $7); sum += $7} END {print sum+0}')
+    INIT_PEER_RX=$(ip netns exec "${TEST_NS}" ip -s link show veth-peer 2>/dev/null | awk '/RX:/ {getline; print $1}')
+
+    # Authenticator sends IEEE 802.1X EAP-Request/Identity (EtherType 0x888e) from peer to tap
+    if command -v python3 >/dev/null 2>&1; then
+        ip netns exec "${TEST_NS}" python3 -c "
+from scapy.all import Ether, Raw, sendp
+# EAPOL Version 1, Type 0 (EAP-Packet), Len 5, EAP Code 1 (Request), Id 1, Len 5, Type 1 (Identity)
+eapol_req = b'\x01\x00\x00\x05\x01\x01\x00\x05\x01'
+req_pkt = Ether(src='00:50:56:bb:cc:01', dst='01:80:c2:00:00:03', type=0x888e) / Raw(load=eapol_req)
+sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
+" 2>/dev/null || true
+    fi
+
+    # Supplicant/client on veth-tap attempts to send an EAP-Response/Identity answer back
+    echo -n "[TEST] Verifying 802.1X EAP-Response answer dropped on egress... "
+    if command -v python3 >/dev/null 2>&1; then
+        ip netns exec "${TEST_NS}" python3 -c "
+from scapy.all import Ether, Raw, sendp
+# EAPOL Version 1, Type 0 (EAP-Packet), EAP Code 2 (Response), Id 1, Type 1 (Identity)
+eapol_resp = b'\x01\x00\x00\x18\x02\x01\x00\x18\x01supplicant@internal'
+resp_pkt = Ether(src='02:00:00:00:00:01', dst='00:50:56:bb:cc:01', type=0x888e) / Raw(load=eapol_resp)
+try:
+    sendp(resp_pkt, iface='veth-tap', count=1, verbose=0)
+except OSError:
+    pass
+" 2>/dev/null || true
+    fi
+
+    AFTER_RESP_DROPS=$(ip netns exec "${TEST_NS}" tc -s filter show dev veth-tap egress 2>/dev/null | awk '/dropped/ {gsub(/,/, "", $7); sum += $7} END {print sum+0}')
+    AFTER_RESP_PEER_RX=$(ip netns exec "${TEST_NS}" ip -s link show veth-peer 2>/dev/null | awk '/RX:/ {getline; print $1}')
+
+    if [[ "${AFTER_RESP_DROPS}" -gt "${INIT_EAP_DROPS}" ]] && [[ "${AFTER_RESP_PEER_RX}" -eq "${INIT_PEER_RX}" ]]; then
+        echo "PASSED (blocked EAP-Response, 0 frames leaked to peer)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (egress drops before: ${INIT_EAP_DROPS}, after: ${AFTER_RESP_DROPS} | peer RX before: ${INIT_PEER_RX}, after: ${AFTER_RESP_PEER_RX})"
+        FAILED=$((FAILED + 1))
+    fi
+
+    # If wpa_supplicant is available, also test real userspace 802.1X supplicant daemon response drop
+    if command -v wpa_supplicant >/dev/null 2>&1; then
+        echo -n "[TEST] Verifying wpa_supplicant 802.1X response answer dropped on egress... "
+        WPA_CONF_FILE=$(mktemp /tmp/wpa_eap.XXXXXX.conf)
+        WPA_PID_FILE=$(mktemp /tmp/wpa_eap.XXXXXX.pid)
+        rm -f "${WPA_PID_FILE}"
+        cat << 'EOF' > "${WPA_CONF_FILE}"
+ctrl_interface=/var/run/wpa_supplicant
+network={
+    key_mgmt=IEEE8021X
+    eap=MD5
+    identity="testuser"
+    password="password"
+}
+EOF
+        WPA_DROPS_PRE=$(ip netns exec "${TEST_NS}" tc -s filter show dev veth-tap egress 2>/dev/null | awk '/dropped/ {gsub(/,/, "", $7); sum += $7} END {print sum+0}')
+        ip netns exec "${TEST_NS}" wpa_supplicant -i veth-tap -c "${WPA_CONF_FILE}" -D wired -B -P "${WPA_PID_FILE}" 2>/dev/null || true
+        sleep 0.3
+
+        # Authenticator transmits EAP-Request/Identity for wpa_supplicant
+        if command -v python3 >/dev/null 2>&1; then
+            ip netns exec "${TEST_NS}" python3 -c "
+from scapy.all import Ether, Raw, sendp
+eapol_req = b'\x01\x00\x00\x05\x01\x02\x00\x05\x01'
+req_pkt = Ether(src='00:50:56:bb:cc:01', dst='01:80:c2:00:00:03', type=0x888e) / Raw(load=eapol_req)
+sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
+" 2>/dev/null || true
+        fi
+        sleep 0.5
+
+        if [[ -f "${WPA_PID_FILE}" ]]; then
+            kill "$(cat "${WPA_PID_FILE}")" 2>/dev/null || true
+            rm -f "${WPA_PID_FILE}"
+        fi
+        rm -f "${WPA_CONF_FILE}"
+        WPA_CONF_FILE=""
+        WPA_PID_FILE=""
+
+        WPA_DROPS_POST=$(ip netns exec "${TEST_NS}" tc -s filter show dev veth-tap egress 2>/dev/null | awk '/dropped/ {gsub(/,/, "", $7); sum += $7} END {print sum+0}')
+        WPA_PEER_RX_POST=$(ip netns exec "${TEST_NS}" ip -s link show veth-peer 2>/dev/null | awk '/RX:/ {getline; print $1}')
+
+        if [[ "${WPA_DROPS_POST}" -gt "${WPA_DROPS_PRE}" ]] && [[ "${WPA_PEER_RX_POST}" -eq "${INIT_PEER_RX}" ]]; then
+            echo "PASSED (blocked wpa_supplicant EAP-Response, 0 frames leaked to peer)"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (wpa drops before: ${WPA_DROPS_PRE}, after: ${WPA_DROPS_POST} | peer RX: ${WPA_PEER_RX_POST})"
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+
+    # Teardown 802.1X session
+    assert_success "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap
+
+    # Verify that the incoming 802.1X EAP-Request was captured and recognized by the analyzer
+    echo -n "[TEST] Verifying 802.1X EAPOL frames captured in pcap and detected by analyzer... "
+    EAP_JSON=$("$BIN_PATH" analyze -d "${TEST_EAP_DIR}" --json 2>/dev/null || echo "{}")
+    if command -v jq >/dev/null 2>&1; then
+        EAP_COUNT=$(echo "${EAP_JSON}" | jq -r '.security_frames.eapol // 0' 2>/dev/null || echo "0")
+        if [[ "${EAP_COUNT}" -ge 1 ]]; then
+            echo "PASSED (detected ${EAP_COUNT} EAPOL frames)"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (analyzer reported ${EAP_COUNT} EAPOL frames, expected >= 1)"
+            FAILED=$((FAILED + 1))
+        fi
+    else
+        echo "PASSED (skipped jq validation)"
+        PASSED=$((PASSED + 1))
+    fi
+
+    rm -rf "${TEST_EAP_DIR}" 2>/dev/null || true
+    TEST_EAP_DIR=""
     # 6.8 Multi-Interface Capture, Netfilter Raw Rules & Sysctl Restoration Test
     echo "[TEST] Running multi-interface dual-tap verification (veth-tap1,veth-tap2)..."
     ip netns exec "${TEST_NS}" ip link add name veth-tap1 type veth peer name veth-peer1

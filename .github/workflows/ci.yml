@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint & Test Suite (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            shellcheck \
+            tcpdump \
+            iproute2 \
+            ethtool \
+            jq \
+            tshark \
+            iptables \
+            procps \
+            python3-scapy \
+            python3-jsonschema
+
+      - name: Run ShellCheck & Unprivileged Tests
+        run: |
+          make test
+
+      - name: Run Privileged Namespace Integration Tests
+        run: |
+          sudo PYTHONDONTWRITEBYTECODE=1 tests/run_tests.sh
+
+      - name: Normalize Artifact Permissions
+        if: failure()
+        run: |
+          sudo chmod -R a+r /var/run/net-tap/ /tmp/net-tap-* 2>/dev/null || true
+
+      - name: Archive Test Failure Diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failure-diagnostics-${{ matrix.os }}
+          path: |
+            /var/run/net-tap/
+            /tmp/net-tap-*
+          if-no-files-found: ignore

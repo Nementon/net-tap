@@ -1,0 +1,15 @@
+# Captures and logs
+captures/
+*.pcap
+!tests/fixtures/*.pcap
+*.log
+*_sfp_ddm.txt
+
+# State files (if created locally instead of /var/run)
+*.state
+
+# Temporary files
+*~
+.DS_Store
+__pycache__/
+*.py[cod]

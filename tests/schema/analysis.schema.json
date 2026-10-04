@@ -1,0 +1,207 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NetTapAnalysisReport",
+  "description": "Schema for net-tap JSON analysis output",
+  "type": "object",
+  "required": [
+    "vlans",
+    "qinq_frames",
+    "mac_addresses",
+    "ipv4_addresses",
+    "ipv4_gateways",
+    "ipv6_addresses",
+    "ipv6_prefixes",
+    "ipv6_routers",
+    "resolution",
+    "tunnels",
+    "protocols",
+    "infrastructure_frames",
+    "security_frames",
+    "dpi"
+  ],
+  "properties": {
+    "vlans": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5])$" }
+    },
+    "qinq_frames": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "mac_addresses": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$" }
+    },
+    "ipv4_addresses": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "ipv4" }
+    },
+    "ipv4_gateways": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "ipv4" }
+    },
+    "ipv6_addresses": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "ipv6" }
+    },
+    "ipv6_prefixes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^([0-9a-fA-F:]+)/[0-9]{1,3}$" }
+    },
+    "ipv6_routers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "ipv6" }
+    },
+    "resolution": {
+      "type": "object",
+      "required": ["arp_frames", "ndp_frames", "ndp_details"],
+      "properties": {
+        "arp_frames": { "type": "integer", "minimum": 0 },
+        "ndp_frames": { "type": "integer", "minimum": 0 },
+        "ndp_details": {
+          "type": "object",
+          "required": [
+            "neighbor_solicitation",
+            "neighbor_advertisement",
+            "router_solicitation",
+            "router_advertisement",
+            "redirect"
+          ],
+          "properties": {
+            "neighbor_solicitation": { "type": "integer", "minimum": 0 },
+            "neighbor_advertisement": { "type": "integer", "minimum": 0 },
+            "router_solicitation": { "type": "integer", "minimum": 0 },
+            "router_advertisement": { "type": "integer", "minimum": 0 },
+            "redirect": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "tunnels": {
+      "type": "object",
+      "required": ["vxlan", "gtp_u", "gtp_c", "geneve", "gre", "mpls", "six_in_four", "four_in_six", "srv6"],
+      "properties": {
+        "vxlan": { "type": "integer", "minimum": 0 },
+        "gtp_u": { "type": "integer", "minimum": 0 },
+        "gtp_c": { "type": "integer", "minimum": 0 },
+        "geneve": { "type": "integer", "minimum": 0 },
+        "gre": { "type": "integer", "minimum": 0 },
+        "mpls": { "type": "integer", "minimum": 0 },
+        "six_in_four": { "type": "integer", "minimum": 0 },
+        "four_in_six": { "type": "integer", "minimum": 0 },
+        "srv6": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "protocols": {
+      "type": "object",
+      "required": ["sctp", "pmtud", "tcp_flags"],
+      "properties": {
+        "sctp": { "type": "integer", "minimum": 0 },
+        "pmtud": { "type": "integer", "minimum": 0 },
+        "tcp_flags": {
+          "type": "object",
+          "required": [
+            "syn",
+            "syn_ack",
+            "rst",
+            "fin",
+            "psh",
+            "urg",
+            "zero_window",
+            "retransmission"
+          ],
+          "properties": {
+            "syn": { "type": "integer", "minimum": 0 },
+            "syn_ack": { "type": "integer", "minimum": 0 },
+            "rst": { "type": "integer", "minimum": 0 },
+            "fin": { "type": "integer", "minimum": 0 },
+            "psh": { "type": "integer", "minimum": 0 },
+            "urg": { "type": "integer", "minimum": 0 },
+            "zero_window": { "type": "integer", "minimum": 0 },
+            "retransmission": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "infrastructure_frames": {
+      "type": "object",
+      "required": ["lldp", "cdp", "stp", "vrrp", "hsrp", "isis", "bfd"],
+      "properties": {
+        "lldp": { "type": "integer", "minimum": 0 },
+        "cdp": { "type": "integer", "minimum": 0 },
+        "stp": { "type": "integer", "minimum": 0 },
+        "vrrp": { "type": "integer", "minimum": 0 },
+        "hsrp": { "type": "integer", "minimum": 0 },
+        "isis": { "type": "integer", "minimum": 0 },
+        "bfd": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "security_frames": {
+      "type": "object",
+      "required": ["eapol", "dhcp"],
+      "properties": {
+        "eapol": { "type": "integer", "minimum": 0 },
+        "dhcp": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "dpi": {
+      "type": "object",
+      "required": [
+        "snmp_community_strings",
+        "ospf_routers",
+        "bgp_asns",
+        "dhcp_hostnames",
+        "dns_queries",
+        "tls_sni"
+      ],
+      "properties": {
+        "snmp_community_strings": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "ospf_routers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "format": "ipv4" }
+        },
+        "bgp_asns": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9]+$" }
+        },
+        "dhcp_hostnames": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "dns_queries": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "tls_sni": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

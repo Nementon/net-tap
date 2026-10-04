@@ -2,14 +2,14 @@
   <img src="assets/logo.jpg" alt="net-tap logo" width="300" />
 </div>
 
-# Net-Tap: Carrier-Grade Stealth Tap & Active Telemetry Suite
+# Net-Tap: Stealth Tap & Active Telemetry Suite
 
 ![Platform](https://img.shields.io/badge/Platform-Linux-blue)
 ![ShellCheck](https://img.shields.io/badge/ShellCheck-Passing-brightgreen)
 [![CI](https://github.com/Nementon/net-tap/actions/workflows/ci.yml/badge.svg)](https://github.com/Nementon/net-tap/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/License-Beerware-orange)
 
-`net-tap` is an automated, carrier-grade network intelligence, stealth packet tapping, and active telemetry suite for Linux. It securely provisions physical or virtual interfaces into a **guaranteed zero-egress promiscuous capture state** (for passive monitoring) or a **watermarked selective-egress state** (for controlled active auditing), manages high-performance ring-buffered packet captures with proactive storage protection, and executes deep protocol analysis to instantly map complex dual-stack (IPv4/IPv6) enterprise and telecommunications networks.
+`net-tap` is an automated, network intelligence, stealth packet tapping, and active telemetry suite for Linux. It securely provisions physical or virtual interfaces into a **guaranteed zero-egress promiscuous capture state** (for passive monitoring) or a **watermarked selective-egress state** (for controlled active auditing), manages high-performance ring-buffered packet captures with proactive storage protection, and executes deep protocol analysis to instantly map complex dual-stack (IPv4/IPv6) enterprise and telecommunications networks.
 
 ### Two Operating Modes:
 * **Passive Stealth Mode (default)**: Enforces an unconditional hardware and kernel egress lock (via `tc clsact`, Netfilter `raw` drops, and 36 non-destructive sysctls) guaranteeing **0 outbound bytes** leak onto the monitored wire while capturing full line-rate traffic.
@@ -286,7 +286,7 @@ sudo make uninstall
 ### Subcommands
 
 ```bash
-net-tap [on|off|status|analyze|probe] [options]
+net-tap [on|off|status|analyze|probe|list|clean] [options]
 ```
 
 | Subcommand | Privilege | Description |
@@ -296,6 +296,8 @@ net-tap [on|off|status|analyze|probe] [options]
 | `status` | Standard User | Inspects interface link status, speed, duplex, hardware drop counters, and active capture file sizes. |
 | `analyze` | Standard User | Performs deep protocol inspection and network mapping against a directory of PCAP traces. |
 | `probe` | `sudo` | Injects rate-limited discovery probes (ARP, NDP, DHCP, PMTU, TCP SYN) with structured audit trails. |
+| `list` | Standard User | Enumerates all active or stale monitoring sessions across host and network namespaces. |
+| `clean` | `sudo` | Reconciles crashed sessions, terminates orphaned processes, purges stale locks, and detaches dangling filters. |
 
 ---
 
@@ -358,6 +360,19 @@ net-tap [on|off|status|analyze|probe] [options]
 | :--- | :--- | :--- | :--- |
 | `-d` | `--dir` | Directory containing PCAP traces (`*.pcap`, `*.pcap.gz`) and metadata logs. | `./captures` |
 | `-j` | `--json` | Output analysis results as an RFC 8259 structured JSON document. | Disabled (Human-readable) |
+
+#### Options for `net-tap list`
+| Flag | Long Option | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `-i` | `--interface` | Filter sessions by network interface. | All interfaces |
+| `-n` | `--netns` | Filter sessions by network namespace. | All namespaces |
+| `-j` | `--json` | Output session inventory as a structured JSON array. | Disabled (Human-readable) |
+
+#### Options for `net-tap clean`
+| Flag | Long Option | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `-i` | `--interface` | Clean specific interface session only. | All sessions |
+| `-n` | `--netns` | Target specific network namespace for cleanup. | All namespaces |
 
 #### Environment Variables
 | Variable | Description | Default |

@@ -967,3 +967,194 @@ status_tap() {
         echo -e "\n  Tap Engine    : Not running."
     fi
 }
+
+list_sessions() {
+    local found_sessions=0
+    local json_sessions=()
+
+    if [[ ! -d "${STATE_DIR}" ]]; then
+        if [[ "${JSON_OUT:-0}" -eq 1 ]]; then
+            echo "[]"
+        else
+            echo "No active net-tap sessions found in ${STATE_DIR}."
+        fi
+        return 0
+    fi
+
+    for sfile in "${STATE_DIR}"/*.state; do
+        [[ -f "${sfile}" ]] || continue
+
+        local s_iface="" s_netns="" s_mode="passive" s_pid="" s_out_dir="" s_ts="" s_bpf=""
+        while IFS='=' read -r key val || [[ -n "$key" ]]; do
+            [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+            key=$(echo "$key" | tr -d '[:space:]')
+            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+            case "$key" in
+                IFACE) s_iface="$val" ;;
+                NETNS) s_netns="$val" ;;
+                MODE) s_mode="$val" ;;
+                PID_TCPDUMP) s_pid="$val" ;;
+                OUT_DIR) s_out_dir="$val" ;;
+                TIMESTAMP) s_ts="$val" ;;
+                BPF_FILTER) s_bpf="$val" ;;
+            esac
+        done < "${sfile}"
+
+        if [[ -n "${IFACE:-}" && "${IFACE}" != "${s_iface}" ]]; then
+            continue
+        fi
+        if [[ -n "${NETNS:-}" && "${NETNS}" != "${s_netns}" ]]; then
+            continue
+        fi
+
+        found_sessions=$((found_sessions + 1))
+
+        local is_alive=0
+        if [[ -n "${s_pid}" && "${s_pid}" =~ ^[0-9]+$ ]]; then
+            if [[ -n "${s_netns}" ]]; then
+                if ip netns exec "${s_netns}" kill -0 "${s_pid}" 2>/dev/null; then
+                    is_alive=1
+                elif kill -0 "${s_pid}" 2>/dev/null; then
+                    is_alive=1
+                fi
+            else
+                if kill -0 "${s_pid}" 2>/dev/null; then
+                    is_alive=1
+                fi
+            fi
+        fi
+
+        local status_str="RUNNING"
+        if [[ "${is_alive}" -eq 0 ]]; then
+            status_str="STALE"
+        fi
+
+        local chunk_count=0
+        if [[ -n "${s_out_dir}" && -d "${s_out_dir}" ]]; then
+            chunk_count=$(find "${s_out_dir}" -maxdepth 1 -name "*${s_iface}*.pcap*" 2>/dev/null | wc -l)
+        fi
+
+        if [[ "${JSON_OUT:-0}" -eq 1 ]]; then
+            local ns_json="null"
+            [[ -n "${s_netns}" ]] && ns_json="\"${s_netns}\""
+            json_sessions+=("{\"interface\":\"${s_iface}\",\"netns\":${ns_json},\"mode\":\"${s_mode}\",\"pid\":${s_pid:-0},\"status\":\"${status_str}\",\"output_dir\":\"${s_out_dir}\",\"timestamp\":\"${s_ts}\",\"chunks\":${chunk_count}}")
+        else
+            echo "======================================================================"
+            echo " Session: ${s_iface} $([[ -n "${s_netns}" ]] && echo "[netns: ${s_netns}]" || echo "[host]")"
+            echo "======================================================================"
+            echo -e "  Status        : $([[ "${status_str}" == "RUNNING" ]] && echo -e "${C_GREEN}${status_str}${C_RESET}" || echo -e "${C_RED}${status_str}${C_RESET}")"
+            echo "  Mode          : ${s_mode}"
+            echo "  Capture PID   : ${s_pid:-N/A}"
+            echo "  Started       : ${s_ts:-N/A}"
+            echo "  Output Dir    : ${s_out_dir:-N/A} (${chunk_count} chunk(s))"
+            [[ -n "${s_bpf}" ]] && echo "  BPF Filter    : ${s_bpf}"
+            echo ""
+        fi
+    done
+
+    if [[ "${JSON_OUT:-0}" -eq 1 ]]; then
+        local IFS=','
+        echo "[${json_sessions[*]}]"
+    else
+        if [[ "${found_sessions}" -eq 0 ]]; then
+            echo "No active net-tap sessions found in ${STATE_DIR}."
+        else
+            echo "Total active session(s): ${found_sessions}"
+        fi
+    fi
+}
+
+clean_sessions() {
+    require_root
+    log_info "Reconciling net-tap sessions and purging stale state/locks..."
+
+    local cleaned_sessions=0
+    local cleaned_locks=0
+
+    if [[ -d "${STATE_DIR}" ]]; then
+        for sfile in "${STATE_DIR}"/*.state; do
+            [[ -f "${sfile}" ]] || continue
+
+            local s_iface="" s_netns="" s_pid="" s_pid_watchdog="" s_pid_autoshutdown=""
+            while IFS='=' read -r key val || [[ -n "$key" ]]; do
+                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+                key=$(echo "$key" | tr -d '[:space:]')
+                val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
+                case "$key" in
+                    IFACE) s_iface="$val" ;;
+                    NETNS) s_netns="$val" ;;
+                    PID_TCPDUMP) s_pid="$val" ;;
+                    PID_WATCHDOG) s_pid_watchdog="$val" ;;
+                    PID_AUTOSHUTDOWN) s_pid_autoshutdown="$val" ;;
+                esac
+            done < "${sfile}"
+
+            if [[ -n "${IFACE:-}" && "${IFACE}" != "${s_iface}" ]]; then
+                continue
+            fi
+            if [[ -n "${NETNS:-}" && "${NETNS}" != "${s_netns}" ]]; then
+                continue
+            fi
+
+            log_info "Cleaning session for interface(s): '${s_iface}' $([[ -n "${s_netns}" ]] && echo "in netns '${s_netns}'")"
+
+            for p in "${s_pid}" "${s_pid_watchdog}" "${s_pid_autoshutdown}"; do
+                if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
+                    if kill -0 "$p" 2>/dev/null; then
+                        kill -SIGTERM "$p" 2>/dev/null || true
+                        sleep 0.05
+                        kill -9 "$p" 2>/dev/null || true
+                    fi
+                fi
+            done
+
+            IFS=',' read -ra if_arr <<< "${s_iface}"
+            for dev in "${if_arr[@]}"; do
+                if [[ -n "${s_netns}" ]]; then
+                    ip netns exec "${s_netns}" tc qdisc del dev "${dev}" clsact 2>/dev/null || true
+                    ip netns exec "${s_netns}" iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                    ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                    ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                    ip netns exec "${s_netns}" ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                    ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                    ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                    ip netns exec "${s_netns}" ip link set "${dev}" down 2>/dev/null || true
+                else
+                    tc qdisc del dev "${dev}" clsact 2>/dev/null || true
+                    iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                    iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                    iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                    ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                    ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                    ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                    ip link set "${dev}" down 2>/dev/null || true
+                fi
+            done
+
+            rm -f "${sfile}"
+            cleaned_sessions=$((cleaned_sessions + 1))
+        done
+
+        if [[ -z "${IFACE:-}" ]]; then
+            for lk in "${STATE_DIR}"/.lock_* "${STATE_DIR}"/*.lock; do
+                if [[ -f "${lk}" ]]; then
+                    rm -f "${lk}"
+                    cleaned_locks=$((cleaned_locks + 1))
+                fi
+            done
+        else
+            local safe_i="${IFACE//\//_}"
+            local safe_n="${NETNS//\//_}"
+            local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
+            [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
+            for lk in "${lk_pattern}"*; do
+                if [[ -f "${lk}" ]]; then
+                    rm -f "${lk}"
+                    cleaned_locks=$((cleaned_locks + 1))
+                fi
+            done
+        fi
+    fi
+
+    log_ok "Cleanup complete: ${cleaned_sessions} session(s) detached, ${cleaned_locks} lock file(s) purged."
+}

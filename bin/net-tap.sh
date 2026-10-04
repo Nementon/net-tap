@@ -435,6 +435,12 @@ main() {
         probe)
             run_probe
             ;;
+        list)
+            list_sessions
+            ;;
+        clean)
+            clean_sessions
+            ;;
         *)
             log_err "Unknown action: '${ACTION}'"
             usage

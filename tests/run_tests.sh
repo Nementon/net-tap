@@ -122,6 +122,8 @@ assert_fail "required" "$BIN_PATH" status
 assert_fail "(required|requires root privileges)" "$BIN_PATH" on
 assert_fail "(required|requires root privileges)" "$BIN_PATH" off
 assert_fail "(required|requires root privileges)" "$BIN_PATH" probe
+assert_success "$BIN_PATH" list
+assert_success "$BIN_PATH" list -j
 
 # --- 2. Input Validation Tests ---
 assert_fail "Invalid interface name format" "$BIN_PATH" status -i "bad;name"
@@ -158,6 +160,7 @@ if [[ $EUID -ne 0 ]]; then
     assert_fail "requires root privileges" "$BIN_PATH" on -i lo
     assert_fail "requires root privileges" "$BIN_PATH" off -i lo
     assert_fail "requires root privileges" "$BIN_PATH" probe -i lo --arp-scan
+    assert_fail "requires root privileges" "$BIN_PATH" clean
 else
     # We are root; test that non-root user is rejected by staging into /tmp
     if command -v su >/dev/null 2>&1 && id -u nobody >/dev/null 2>&1; then
@@ -1217,6 +1220,11 @@ except Exception as e:
     ip netns del "${TEST_NS}"
     TEST_NS=""
     # test ns is deleted, cleanup will handle the rest
+
+    # 6.12 Verify net-tap list and net-tap clean
+    assert_success "$BIN_PATH" list
+    assert_success "$BIN_PATH" list -j
+    assert_success "$BIN_PATH" clean
 else
     echo "[WARNING] Not running as root, skipping Section 6 tests."
 fi

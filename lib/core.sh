@@ -340,8 +340,8 @@ release_lock() {
 usage() {
     local exit_code="${1:-1}"
     cat <<EOF
-Usage: $0 <on|off|status|analyze|probe> [options]
-(Note: 'on', 'off', and 'probe' require sudo / root privileges)
+Usage: $0 <on|off|status|analyze|probe|list|clean> [options]
+(Note: 'on', 'off', 'probe', and 'clean' require sudo / root privileges)
 
 Commands:
   on        Enable tap mode, monitor carrier status, and spawn background capture.
@@ -349,9 +349,11 @@ Commands:
   status    Check interface carrier state (Active/Inactive), link params, and capture stats.
   analyze   Deep-analyze PCAPs and log files in a target directory to deduce network config.
   probe     Execute active, controlled discovery probes with audit logging and rate-limiting.
+  list      Enumerate all active net-tap sessions and background captures.
+  clean     Reconcile crashed sessions, purge stale locks, and detach dangling filters.
 
 Options:
-  -i, --interface <iface>   Target network interface (required for on, off, status, probe).
+  -i, --interface <iface>   Target network interface (required for on, off, status, probe; optional for list, clean).
   -n, --netns <name>        Target Linux network namespace to run the capture in.
   -m, --mode <mode>         Operational mode: 'passive' (zero-egress) or 'active' (audit probes permitted).
   -t, --type <type>         Hardware type: 'ethernet' or 'sfp' (default: ${DEFAULT_HW_TYPE}).

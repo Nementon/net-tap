@@ -147,6 +147,10 @@ assert_fail "Probe timeout must be a positive integer in seconds" "$BIN_PATH" pr
 assert_fail "Probe timeout must be a positive integer in seconds" "$BIN_PATH" probe -i lo --arp-scan --timeout "notanumber"
 assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan 5000
 assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan 0
+assert_fail "Invalid VLAN range" "$BIN_PATH" probe -i lo --arp-scan --vlan "20-10"
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan "10,5000"
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan "badvlan"
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan "10-20-30"
 assert_fail "QinQ tags must be in format 's_tag,c_tag'" "$BIN_PATH" probe -i lo --arp-scan --qinq "badqinq"
 
 # --- 3. Privilege Checks ---
@@ -1127,6 +1131,8 @@ sniff(iface='veth-peer', timeout=10, prn=process_pkt)
     # Execute active probes
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --arp-scan 192.0.2.99/32 --rate 50
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --vlan 100 --arp-scan 10.100.1.1/32 --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --vlan 100,102 --arp-scan 10.100.1.1/32 --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --vlan 100-101 --arp-scan 10.100.1.1/32 --rate 50
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --auto-vlans --arp-scan 10.100.1.1/32 --rate 50
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --dhcp-discover
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --icmp-pmtu 192.0.2.99

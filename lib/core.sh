@@ -369,12 +369,13 @@ Options:
 
 Probe Options (for 'probe' command):
   --arp-scan <cidr>         Scan IPv4 subnet via ARP requests (e.g., 192.168.1.0/24).
-  --ndp-scan <cidr>         Scan IPv6 subnet via ICMPv6 Neighbor Solicitations.
-  --dhcp-discover           Broadcast DHCP Discover to audit DHCP servers and Option 82.
+  --ndp-scan <cidr>         Scan IPv6 subnet via ICMPv6 Neighbor/Router Solicitations.
+  --dhcp-discover           Broadcast RFC 2131 DHCP Discover (IPv4).
+  --dhcp-discover6          Transmit RFC 8415 DHCPv6 Solicit (IPv6).
   --icmp-pmtu <target>      Measure Path MTU using stepped DF-bit ICMP Echo requests.
   --tcp-syn <target>        Probe TCP port availability using single SYN packets.
   -p, --ports <ports>       Target port list for TCP probe (e.g., 22,80,443; default: 22,80,443).
-  --vlan <vid>              Inject probes with IEEE 802.1Q VLAN tag (1-4094).
+  --vlan <vid>              Inject probes with IEEE 802.1Q VLAN tag(s) (e.g. 100, 10-20, or 10,20,100-105).
   --qinq <s-tag,c-tag>      Inject probes with double-tagged QinQ headers (e.g., 100,200).
   --auto-vlans              Automatically probe across all VLANs passively observed on link.
   --rate <pps>              Maximum probe transmission rate in packets/sec (default: 50).

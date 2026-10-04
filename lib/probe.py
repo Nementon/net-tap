@@ -105,14 +105,43 @@ def parse_args():
                         help="Probe type")
     parser.add_argument("--target", default="", help="Target IP, subnet, or CIDR")
     parser.add_argument("--ports", default="22,80,443", help="Target TCP ports (comma-separated)")
-    parser.add_argument("--vlan", type=int, default=None, help="802.1Q VLAN ID (1-4094)")
+    parser.add_argument("--vlan", default=None, help="802.1Q VLAN ID, list, or range (1-4094)")
     parser.add_argument("--qinq", default="", help="QinQ tags as s_tag,c_tag (e.g., 100,200)")
-    parser.add_argument("--vlans", default="", help="List of VLANs to probe (comma-separated)")
+    parser.add_argument("--vlans", default="", help="List of VLANs to probe (comma-separated or ranges)")
     parser.add_argument("--rate", type=int, default=50, help="Max packets per second")
     parser.add_argument("--timeout", type=int, default=5, help="Probe timeout in seconds")
     parser.add_argument("--audit-file", required=True, help="Path to JSONL audit log")
     parser.add_argument("--audit-id", default="", help="Audit correlation ID")
     return parser.parse_args()
+
+
+def parse_vlan_spec(spec: str) -> list:
+    """Parse comma-separated VLAN IDs and hyphenated ranges (e.g. '100', '10-20', '10,20,100-105')."""
+    vlans = []
+    seen = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            sub = [p.strip() for p in part.split("-")]
+            if len(sub) != 2:
+                raise ValueError(f"Invalid range format '{part}'")
+            start, end = int(sub[0]), int(sub[1])
+            if start < 1 or end > 4094 or start > end:
+                raise ValueError(f"Invalid range '{part}'. Values must be 1-4094 and start <= end.")
+            for v in range(start, end + 1):
+                if v not in seen:
+                    seen.add(v)
+                    vlans.append(v)
+        else:
+            v = int(part)
+            if v < 1 or v > 4094:
+                raise ValueError(f"VLAN ID {v} out of range 1-4094.")
+            if v not in seen:
+                seen.add(v)
+                vlans.append(v)
+    return vlans
 
 
 def log_audit(audit_f, audit_id: str, probe_type: str, target: str, vlan: int, qinq: str,
@@ -143,14 +172,13 @@ def main():
 
     # Parse VLAN configurations
     vlan_list = []
-    if args.vlans:
+    spec = args.vlans if args.vlans else (str(args.vlan) if args.vlan is not None else "")
+    if spec:
         try:
-            vlan_list = [int(v.strip()) for v in args.vlans.split(",") if v.strip()]
-        except ValueError:
-            sys.stderr.write("ERROR: Malformed --vlans list. Expected comma-separated integers.\n")
+            vlan_list = parse_vlan_spec(spec)
+        except ValueError as err:
+            sys.stderr.write(f"ERROR: {err}\n")
             sys.exit(1)
-    elif args.vlan is not None:
-        vlan_list = [args.vlan]
     else:
         vlan_list = [None]  # Untagged
 

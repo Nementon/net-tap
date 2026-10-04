@@ -346,7 +346,7 @@ net-tap [on|off|status|analyze|probe] [options]
 | - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 1500-9000B, IPv6: 1280-9000B). | None |
 | - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | None |
 | `-p` | `--ports` | Target TCP port list for `--tcp-syn` (e.g., `22,80,443`). | `22,80,443` |
-| - | `--vlan` | Inject probes tagged with specified IEEE 802.1Q VLAN ID (1-4094). | Untagged |
+| - | `--vlan` | Inject probes tagged with IEEE 802.1Q VLAN ID(s) (single `100`, list `10,20`, or range `10-20`). | Untagged |
 | - | `--qinq` | Inject probes double-tagged with 802.1ad QinQ as `s_tag,c_tag` (e.g., `100,200`). | None |
 | - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
 | - | `--rate` | Maximum probe transmission rate in packets per second. | `50` |
@@ -568,7 +568,7 @@ The `--arp-scan <cidr>` probe actively discovers live IPv4 hosts on an untagged 
 
 **Implementation Details:**
 - **Packet Crafting**: [`lib/probe.py`](lib/probe.py) synthesizes raw Ethernet frames (`Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(op="who-has", pdst=ip)`) with the sender IP set to `0.0.0.0` (or user override) and sender MAC set to the interface hardware MAC (or spoofed MAC).
-- **VLAN Tagging**: When `--vlan <id>` or `--qinq <outer>,<inner>` is specified, Scapy prepends `Dot1Q` headers directly in user space without requiring kernel VLAN sub-interfaces (`eth1.100`).
+- **VLAN Tagging**: When `--vlan <spec>` (single ID `100`, list `10,20`, or range `10-20`) or `--qinq <outer>,<inner>` is specified, Scapy prepends `Dot1Q` headers directly in user space without requiring kernel VLAN sub-interfaces (`eth1.100`).
 - **Response Handling**: The prober transmits frames at the specified `--rate` (default: 100 pps). Incoming ARP replies (`op="is-at"`) are captured passively by the background `tcpdump` process into the rotating PCAP ring buffer.
 - **Offline Correlation**: During `net-tap analyze`, [`lib/analyzer.sh`](lib/analyzer.sh) cross-references the probe audit log with the PCAP ring buffer to extract host IP, responding MAC, and correlated VLAN tag.
 

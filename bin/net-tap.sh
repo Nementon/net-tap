@@ -304,10 +304,36 @@ main() {
             exit 1
         fi
         if [[ -n "${PROBE_VLAN}" ]]; then
-            if ! [[ "${PROBE_VLAN}" =~ ^[0-9]+$ ]] || [[ "${PROBE_VLAN}" -lt 1 ]] || [[ "${PROBE_VLAN}" -gt 4094 ]]; then
-                log_err "VLAN ID must be an integer between 1 and 4094."
+            if ! [[ "${PROBE_VLAN}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+                log_err "VLAN ID must be an integer between 1 and 4094 (or range 'start-end')."
                 exit 1
             fi
+            local expanded_vlans=()
+            IFS=',' read -ra vlan_tokens <<< "${PROBE_VLAN}"
+            for tok in "${vlan_tokens[@]}"; do
+                if [[ "${tok}" == *"-"* ]]; then
+                    local v_start="${tok%%-*}"
+                    local v_end="${tok##*-}"
+                    if [[ "${v_start}" -lt 1 || "${v_start}" -gt 4094 || "${v_end}" -lt 1 || "${v_end}" -gt 4094 ]]; then
+                        log_err "VLAN ID must be an integer between 1 and 4094."
+                        exit 1
+                    fi
+                    if [[ "${v_start}" -gt "${v_end}" ]]; then
+                        log_err "Invalid VLAN range '${tok}': start (${v_start}) cannot be greater than end (${v_end})."
+                        exit 1
+                    fi
+                    for ((v = v_start; v <= v_end; v++)); do
+                        expanded_vlans+=("${v}")
+                    done
+                else
+                    if [[ "${tok}" -lt 1 || "${tok}" -gt 4094 ]]; then
+                        log_err "VLAN ID must be an integer between 1 and 4094."
+                        exit 1
+                    fi
+                    expanded_vlans+=("${tok}")
+                fi
+            done
+            PROBE_VLAN=$(printf "%s\n" "${expanded_vlans[@]}" | sort -n -u | paste -sd, -)
         fi
         if [[ -n "${PROBE_QINQ}" ]] && ! [[ "${PROBE_QINQ}" =~ ^[0-9]+,[0-9]+$ ]]; then
             log_err "QinQ tags must be in format 's_tag,c_tag' (e.g., 100,200)."

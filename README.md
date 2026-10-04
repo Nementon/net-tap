@@ -33,6 +33,7 @@
   - [4. Live Interface & Capture Status](#4-live-interface--capture-status)
   - [5. Stop Tapping & Interface Teardown](#5-stop-tapping--interface-teardown)
   - [6. Deep Network Profiling & SIEM JSON Export](#6-deep-network-profiling--siem-json-export)
+  - [7. Active Probing & Lab Network Auditing](#7-active-probing--lab-network-auditing)
 - [Sample Analysis Output](#sample-analysis-output)
   - [Human-Readable Terminal Dashboard](#human-readable-terminal-dashboard)
   - [Structured JSON Export Schema](#structured-json-export-schema)
@@ -262,15 +263,16 @@ sudo make uninstall
 ### Subcommands
 
 ```bash
-net-tap [on|off|status|analyze] [options]
+net-tap [on|off|status|analyze|probe] [options]
 ```
 
 | Subcommand | Privilege | Description |
 | :--- | :--- | :--- |
-| `on` | `sudo` | Provisions silent zero-egress tap mode, disables offloads, and spawns rotating background capture. |
+| `on` | `sudo` | Provisions silent tap mode (passive or active), disables offloads, and spawns rotating background capture. |
 | `off` | `sudo` | Terminates capture, merges traces (if dual-port), removes `tc` drop filters, and restores original NIC state. |
 | `status` | Standard User | Inspects interface link status, speed, duplex, hardware drop counters, and active capture file sizes. |
 | `analyze` | Standard User | Performs deep protocol inspection and network mapping against a directory of PCAP traces. |
+| `probe` | `sudo` | Injects rate-limited discovery probes (ARP, NDP, DHCP, PMTU, TCP SYN) with structured audit trails. |
 
 ---
 
@@ -285,6 +287,7 @@ net-tap [on|off|status|analyze] [options]
 | Flag | Long Option | Description | Default |
 | :--- | :--- | :--- | :--- |
 | `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (e.g. `eth1` or `sfp0,sfp1`). | None |
+| `-m` | `--mode` | Operational mode: `passive` (strict zero-egress stealth) or `active` (permits explicitly marked audit probes via `net-tap probe` while continuing to drop unsolicited OS emissions). | `passive` |
 | `-o` | `--output-dir` | Target directory for PCAP traces and optical/link logs. | `./captures` |
 | `-t` | `--type` | Hardware type: `ethernet` or `sfp`. | `ethernet` |
 | `-s` | `--speed` | Force link speed in Mbps for SFP transceivers (e.g. `1000`, `10000`). | Auto |
@@ -307,6 +310,24 @@ net-tap [on|off|status|analyze] [options]
 | :--- | :--- | :--- | :--- |
 | `-i` | `--interface` | **(Required)** Target network interface(s), comma-separated. | None |
 | `-n` | `--netns` | Target Linux network namespace (auto-discovered from active tap state if omitted; requires `sudo` when targeting isolated netns). | Auto (Host default) |
+
+#### Options for `net-tap probe`
+| Flag | Long Option | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `-i` | `--interface` | **(Required)** Target single network interface (must have active session with `--mode active`). | None |
+| `-n` | `--netns` | Target Linux network namespace (auto-discovered if omitted). | Host namespace |
+| - | `--arp-scan` | Scan IPv4 subnet or host via ARP requests (e.g., `--arp-scan 192.168.1.0/24`). | None |
+| - | `--ndp-scan` | Scan IPv6 subnet via ICMPv6 Neighbor Solicitations or Router Solicitations (`ff02::2`). | `ff02::2` |
+| - | `--dhcp-discover`| Broadcast RFC 2131 DHCP Discover to audit DHCP servers and Option 82 relays. | None |
+| - | `--icmp-pmtu` | Probe Path MTU to target using stepped DF-bit ICMP Echo requests (1500, 2000, 4000, 9000). | None |
+| - | `--tcp-syn` | Probe TCP port availability using single SYN packets. | None |
+| `-p` | `--ports` | Target TCP port list for `--tcp-syn` (e.g., `22,80,443`). | `22,80,443` |
+| - | `--vlan` | Inject probes tagged with specified IEEE 802.1Q VLAN ID (1-4094). | Untagged |
+| - | `--qinq` | Inject probes double-tagged with 802.1ad QinQ as `s_tag,c_tag` (e.g., `100,200`). | None |
+| - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
+| - | `--rate` | Maximum probe transmission rate in packets per second. | `50` |
+| - | `--timeout` | Maximum probe duration timeout in seconds. | `5` |
+| - | `--audit-id` | Custom audit identifier for probe session correlation in JSONL log. | Auto |
 
 #### Options for `net-tap analyze`
 | Flag | Long Option | Description | Default |
@@ -430,6 +451,42 @@ net-tap analyze -d /data/trace
 
 # Machine-readable JSON export for SIEM (Splunk / Elastic)
 net-tap analyze -d /data/trace --json > network_profile.json
+```
+
+---
+
+### 7. Active Probing & Lab Network Auditing
+When auditing lab switches, edge routers, or testbed segments where active stimulus is required, `net-tap` supports **Controlled Active Probing Mode** (`--mode active`). In this mode:
+- All 36 stealth sysctls remain fully engaged.
+- Kernel `tc clsact` selective egress guards permit ONLY raw frames explicitly stamped with `SO_MARK 0x7a9` (fwmark 1961), while dropping all unsolicited host OS emissions (SLAAC, DAD, mDNS, etc.).
+- Every transmitted packet is rate-limited and logged to a structured `<timestamp>_<iface>_probe_audit.jsonl` audit log.
+- Supports raw Layer 2 802.1Q single-tagging (`--vlan`), 802.1ad QinQ double-tagging (`--qinq`), and smart `--auto-vlans` sweeping across passively observed tags.
+
+```bash
+# 1. Start tap in Active Mode
+sudo net-tap on -i eth1 --mode active -o /data/lab_audit
+
+# 2. Run ARP subnet discovery (untagged)
+sudo net-tap probe -i eth1 --arp-scan 192.168.1.0/24 --rate 50
+
+# 3. Run ARP discovery on a specific 802.1Q VLAN
+sudo net-tap probe -i eth1 --vlan 100 --arp-scan 10.100.1.0/24
+
+# 4. Smart Passive-to-Active Discovery: Automatically sweep across all observed VLANs
+sudo net-tap probe -i eth1 --auto-vlans --arp-scan 10.0.0.0/24
+
+# 5. Broadcast DHCP Discover to audit DHCP servers & Option 82 relays
+sudo net-tap probe -i eth1 --dhcp-discover
+
+# 6. Measure Path MTU using stepped DF-bit ICMP Echo requests
+sudo net-tap probe -i eth1 --icmp-pmtu 192.168.1.1
+
+# 7. Check specific TCP services with light SYN probes
+sudo net-tap probe -i eth1 --tcp-syn 192.168.1.1 -p 22,80,443,8080
+
+# 8. Stop capture and correlate responses
+sudo net-tap off -i eth1
+net-tap analyze -d /data/lab_audit
 ```
 
 ---
@@ -567,6 +624,19 @@ Top TLS SNI Destinations:
   -> telemetry.internal.network
 
 ======================================================================
+ [7] ACTIVE AUDIT & TARGET PROBING CORRELATION
+======================================================================
+  Audit Trail Logs     : 1 audit file(s) found in capture dir
+  Probes Transmitted   : 254 packet(s)
+  Responses Received   : 4 packet(s)
+  VLAN Profiles Tested : untagged, 10, 20
+
+  Discovered Responsive Hosts:
+    -> 10.0.10.1 [00:11:22:33:44:55] (VLAN: 10)
+    -> 10.0.20.1 [00:1a:2b:3c:4d:5e] (VLAN: 20)
+    -> 192.168.1.1 [02:00:00:00:00:01] (VLAN: untagged)
+
+======================================================================
                       ANALYSIS COMPLETE
 ======================================================================
 ```
@@ -664,6 +734,29 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     "dhcp_hostnames": ["srv-dc01"],
     "dns_queries": ["srv-dc01.corp.local", "api.internal.network"],
     "tls_sni": ["login.microsoftonline.com", "telemetry.internal.network"]
+  },
+  "active_audit": {
+    "audit_files": ["20261004_143000_eth1_probe_audit.jsonl"],
+    "probes_sent": 254,
+    "responses_received": 4,
+    "vlans_probed": ["untagged", "10", "20"],
+    "discovered_hosts": [
+      {
+        "ip": "10.0.10.1",
+        "mac": "00:11:22:33:44:55",
+        "vlan": "10"
+      },
+      {
+        "ip": "10.0.20.1",
+        "mac": "00:1a:2b:3c:4d:5e",
+        "vlan": "20"
+      },
+      {
+        "ip": "192.168.1.1",
+        "mac": "02:00:00:00:00:01",
+        "vlan": "untagged"
+      }
+    ]
   }
 }
 ```

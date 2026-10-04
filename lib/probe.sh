@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# shellcheck disable=SC2034,SC1091
+
+# lib/probe.sh - Orchestration wrapper for Net-Tap active probing
+
+run_probe() {
+    require_root
+
+    if [[ -z "${IFACE:-}" ]]; then
+        log_err "Interface (-i) is required for probe command."
+        exit 1
+    fi
+
+    if [[ "${IFACE}" == *","* ]]; then
+        log_err "Probe command only supports a single interface at a time."
+        exit 1
+    fi
+
+    if [[ -z "${PROBE_TYPE:-}" ]]; then
+        log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --icmp-pmtu, --tcp-syn)."
+        exit 1
+    fi
+
+    local safe_iface="${IFACE//\//_}"
+    local safe_netns="${NETNS//\//_}"
+    local sfile="${STATE_FILE:-}"
+    if [[ -z "${sfile}" ]]; then
+        sfile="${STATE_DIR}/${safe_iface}.state"
+        if [[ -n "${safe_netns}" ]]; then
+            sfile="${STATE_DIR}/${safe_netns}__${safe_iface}.state"
+        fi
+    fi
+
+    if [[ ! -f "${sfile}" ]]; then
+        log_err "No active net-tap session found on '${IFACE}'."
+        log_err "Please start capture first: sudo net-tap on -i ${IFACE} --mode active"
+        exit 1
+    fi
+
+    if ! load_state_file "${sfile}"; then
+        log_err "Failed to load state file '${sfile}'."
+        exit 1
+    fi
+
+    if [[ "${MODE:-passive}" != "active" ]]; then
+        log_err "Tap session on '${IFACE}' is running in PASSIVE mode (zero-egress stealth)."
+        log_err "Please stop and restart net-tap with '--mode active' to permit audit probing."
+        exit 1
+    fi
+
+    local audit_id="${PROBE_AUDIT_ID:-probe_$(date +%s)_$$}"
+    local audit_file="${OUT_DIR}/${TIMESTAMP}_${safe_iface}_probe_audit.jsonl"
+
+    local probe_vlans=""
+    if [[ "${PROBE_AUTO_VLANS:-0}" -eq 1 ]]; then
+        log_info "Auto-discovering active VLAN tags from capture ring buffer on ${IFACE}..."
+        local discovered_vlans=""
+        for pf in "${OUT_DIR}"/*"${safe_iface}"*.pcap*; do
+            [[ -f "${pf}" ]] || continue
+            local v=""
+            if [[ "${pf}" =~ \.gz$ ]]; then
+                v=$(gzip -dc "${pf}" 2>/dev/null | tcpdump -nn -e -r - 2>/dev/null | awk '/vlan [0-9]+/ {for(i=1;i<=NF;i++) if ($i=="vlan") print $(i+1)}' || true)
+            else
+                v=$(tcpdump -nn -e -r "${pf}" 2>/dev/null | awk '/vlan [0-9]+/ {for(i=1;i<=NF;i++) if ($i=="vlan") print $(i+1)}' || true)
+            fi
+            if [[ -n "${v}" ]]; then
+                discovered_vlans="${discovered_vlans}"$'\n'"${v}"
+            fi
+        done
+        discovered_vlans=$(echo "${discovered_vlans}" | grep -v '^$' | sort -n -u | paste -sd, - || true)
+        if [[ -n "${discovered_vlans}" ]]; then
+            log_ok "Auto-discovered active VLAN(s) on link: ${discovered_vlans}"
+            probe_vlans="${discovered_vlans}"
+        else
+            log_warn "No VLAN tags passively observed yet on '${IFACE}'. Falling back to untagged probing."
+        fi
+    elif [[ -n "${PROBE_VLAN:-}" ]]; then
+        probe_vlans="${PROBE_VLAN}"
+    fi
+
+    local probe_py="${LIB_DIR}/probe.py"
+    if [[ ! -f "${probe_py}" ]]; then
+        probe_py="${SCRIPT_DIR}/../lib/probe.py"
+    fi
+
+    if [[ ! -f "${probe_py}" ]]; then
+        log_err "Could not locate probe.py engine in ${LIB_DIR}!"
+        exit 1
+    fi
+
+    local cmd=(python3 -B "${probe_py}" -i "${IFACE}" -t "${PROBE_TYPE}" --audit-file "${audit_file}" --audit-id "${audit_id}" --rate "${PROBE_RATE:-50}" --timeout "${PROBE_TIMEOUT:-5}")
+    [[ -n "${PROBE_TARGET:-}" ]] && cmd+=(--target "${PROBE_TARGET}")
+    [[ -n "${PROBE_PORTS:-}" ]] && cmd+=(--ports "${PROBE_PORTS}")
+    [[ -n "${probe_vlans}" ]] && cmd+=(--vlans "${probe_vlans}")
+    [[ -n "${PROBE_QINQ:-}" ]] && cmd+=(--qinq "${PROBE_QINQ}")
+
+    log_info "Launching ${PROBE_TYPE^^} probe on ${IFACE} (rate: ${PROBE_RATE:-50} pps)..."
+    cmd_netns "${cmd[@]}"
+    log_ok "Probe completed. Audit trail appended to: ${audit_file}"
+}

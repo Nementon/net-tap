@@ -36,6 +36,7 @@ fi
 source "${LIB_DIR}/core.sh"
 source "${LIB_DIR}/orchestration.sh"
 source "${LIB_DIR}/analyzer.sh"
+source "${LIB_DIR}/probe.sh"
 
 main() {
     # Check for help early
@@ -53,6 +54,7 @@ main() {
     # shellcheck disable=SC2034
     IFACE=""
     NETNS=""
+    MODE="${DEFAULT_MODE:-passive}"
     HW_TYPE="${DEFAULT_HW_TYPE}"
     OUT_DIR="${DEFAULT_OUT_DIR}"
     SPEED="${DEFAULT_SPEED}"
@@ -63,6 +65,17 @@ main() {
     JSON_OUT="${JSON_OUT:-0}"
     COMPRESS_PCAPS="${COMPRESS_PCAPS:-0}"
     DISK_THRESH=85
+
+    # Probe Parameters
+    PROBE_TYPE=""
+    PROBE_TARGET=""
+    PROBE_PORTS="22,80,443"
+    PROBE_VLAN=""
+    PROBE_QINQ=""
+    PROBE_AUTO_VLANS=0
+    PROBE_RATE=50
+    PROBE_TIMEOUT=5
+    PROBE_AUDIT_ID=""
 
     SCRIPT_PATH=$(readlink -f "$0")
 
@@ -76,6 +89,11 @@ main() {
             -n|--netns)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
                 NETNS="$2"
+                shift 2
+                ;;
+            -m|--mode)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                MODE="$(echo "$2" | tr '[:upper:]' '[:lower:]')"
                 shift 2
                 ;;
             -t|--type)
@@ -125,6 +143,80 @@ main() {
             -j|--json)
                 JSON_OUT=1
                 shift
+                ;;
+            --arp-scan)
+                PROBE_TYPE="arp"
+                if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
+                    PROBE_TARGET="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --ndp-scan)
+                PROBE_TYPE="ndp"
+                if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
+                    PROBE_TARGET="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --dhcp-discover)
+                PROBE_TYPE="dhcp"
+                shift
+                ;;
+            --icmp-pmtu)
+                PROBE_TYPE="pmtu"
+                if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
+                    PROBE_TARGET="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --tcp-syn)
+                PROBE_TYPE="tcp_syn"
+                if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
+                    PROBE_TARGET="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            -p|--ports)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_PORTS="$2"
+                shift 2
+                ;;
+            --vlan)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_VLAN="$2"
+                shift 2
+                ;;
+            --qinq)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_QINQ="$2"
+                shift 2
+                ;;
+            --auto-vlans)
+                PROBE_AUTO_VLANS=1
+                shift
+                ;;
+            --rate)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_RATE="$2"
+                shift 2
+                ;;
+            --timeout)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_TIMEOUT="$2"
+                shift 2
+                ;;
+            --audit-id)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_AUDIT_ID="$2"
+                shift 2
                 ;;
             -h|--help)
                 usage 0
@@ -185,6 +277,38 @@ main() {
     if [[ "${HW_TYPE}" != "ethernet" && "${HW_TYPE}" != "sfp" ]]; then
         log_err "Hardware type must be 'ethernet' or 'sfp'."
         exit 1
+    fi
+    if [[ "${MODE}" != "passive" && "${MODE}" != "active" ]]; then
+        log_err "Operational mode must be 'passive' or 'active'."
+        exit 1
+    fi
+    if [[ "${ACTION}" == "probe" ]]; then
+        if [[ -z "${IFACE}" ]]; then
+            log_err "Interface (-i) is required for probe command."
+            exit 1
+        fi
+        if [[ -z "${PROBE_TYPE}" ]]; then
+            log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --icmp-pmtu, --tcp-syn)."
+            exit 1
+        fi
+        if ! [[ "${PROBE_RATE}" =~ ^[1-9][0-9]*$ ]]; then
+            log_err "Probe rate must be a positive integer."
+            exit 1
+        fi
+        if ! [[ "${PROBE_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+            log_err "Probe timeout must be a positive integer in seconds."
+            exit 1
+        fi
+        if [[ -n "${PROBE_VLAN}" ]]; then
+            if ! [[ "${PROBE_VLAN}" =~ ^[0-9]+$ ]] || [[ "${PROBE_VLAN}" -lt 1 ]] || [[ "${PROBE_VLAN}" -gt 4094 ]]; then
+                log_err "VLAN ID must be an integer between 1 and 4094."
+                exit 1
+            fi
+        fi
+        if [[ -n "${PROBE_QINQ}" ]] && ! [[ "${PROBE_QINQ}" =~ ^[0-9]+,[0-9]+$ ]]; then
+            log_err "QinQ tags must be in format 's_tag,c_tag' (e.g., 100,200)."
+            exit 1
+        fi
     fi
 
     if [[ -n "${BPF_FILTER}" ]]; then
@@ -273,6 +397,9 @@ main() {
             ;;
         analyze)
             analyze_session
+            ;;
+        probe)
+            run_probe
             ;;
         *)
             log_err "Unknown action: '${ACTION}'"

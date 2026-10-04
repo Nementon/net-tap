@@ -26,6 +26,7 @@ STATE_DIR="${STATE_DIR:-/var/run/net-tap}"
 COMPRESS_PCAPS="${COMPRESS_PCAPS:-0}"
 JSON_OUT="${JSON_OUT:-0}"
 BPF_FILTER="${BPF_FILTER:-}"
+DEFAULT_MODE="passive"       # 'passive' (zero-egress) or 'active' (controlled audit probing)
 
 # --- Styling Helpers ---
 C_RESET=$'\033[0m'
@@ -170,7 +171,7 @@ load_state_file() {
         log_err "Security violation: State file '${sfile}' contains forbidden expansion characters."
         return 1
     fi
-    local allowed_vars="IFACE|HW_TYPE|TIMESTAMP|NETNS|ROTATE_SIZE|ROTATE_COUNT|OUT_DIR|PIDS_TCPDUMP|PIDS_DMESG|PIDS_IPMON|PCAP_FILES|DMESG_LOGS|LINK_LOGS|TCPDUMP_ERRS|CONFIGURED_IFACES|ORIG_[A-Za-z0-9_]+|PID_WATCHDOG|PID_AUTOSHUTDOWN"
+    local allowed_vars="IFACE|MODE|HW_TYPE|TIMESTAMP|NETNS|ROTATE_SIZE|ROTATE_COUNT|OUT_DIR|PIDS_TCPDUMP|PIDS_DMESG|PIDS_IPMON|PCAP_FILES|DMESG_LOGS|LINK_LOGS|TCPDUMP_ERRS|CONFIGURED_IFACES|ORIG_[A-Za-z0-9_]+|PID_WATCHDOG|PID_AUTOSHUTDOWN"
     # shellcheck disable=SC2016
     if echo "${scontent}" | grep -qvE '^(#.*|[[:space:]]*|declare (--|-a|-A) ('"${allowed_vars}"')(=([0-9]+|"[^"$`\\]*"|\([][a-zA-Z0-9_./@:+=, "-]*\)))?)$'; then
         log_err "Security violation: State file '${sfile}' contains unauthorized expressions."
@@ -339,18 +340,20 @@ release_lock() {
 usage() {
     local exit_code="${1:-1}"
     cat <<EOF
-Usage: $0 <on|off|status|analyze> [options]
-(Note: 'on' and 'off' require sudo / root privileges)
+Usage: $0 <on|off|status|analyze|probe> [options]
+(Note: 'on', 'off', and 'probe' require sudo / root privileges)
 
 Commands:
-  on        Enable silent tap mode, monitor carrier status, and spawn background capture.
+  on        Enable tap mode, monitor carrier status, and spawn background capture.
   off       Stop capture, terminate background loggers, and reset the NIC to default.
   status    Check interface carrier state (Active/Inactive), link params, and capture stats.
   analyze   Deep-analyze PCAPs and log files in a target directory to deduce network config.
+  probe     Execute active, controlled discovery probes with audit logging and rate-limiting.
 
 Options:
-  -i, --interface <iface>   Target network interface (required for on, off, status).
+  -i, --interface <iface>   Target network interface (required for on, off, status, probe).
   -n, --netns <name>        Target Linux network namespace to run the capture in.
+  -m, --mode <mode>         Operational mode: 'passive' (zero-egress) or 'active' (audit probes permitted).
   -t, --type <type>         Hardware type: 'ethernet' or 'sfp' (default: ${DEFAULT_HW_TYPE}).
   -o, --output-dir <path>   Directory to store or read logs/captures (default: ${DEFAULT_OUT_DIR}).
   -d, --dir <path>          Alias for -o when running 'analyze'.
@@ -364,9 +367,27 @@ Options:
   -j, --json                Output analyze results as JSON (suppresses human-readable text).
   -h, --help                Show this help message.
 
+Probe Options (for 'probe' command):
+  --arp-scan <cidr>         Scan IPv4 subnet via ARP requests (e.g., 192.168.1.0/24).
+  --ndp-scan <cidr>         Scan IPv6 subnet via ICMPv6 Neighbor Solicitations.
+  --dhcp-discover           Broadcast DHCP Discover to audit DHCP servers and Option 82.
+  --icmp-pmtu <target>      Measure Path MTU using stepped DF-bit ICMP Echo requests.
+  --tcp-syn <target>        Probe TCP port availability using single SYN packets.
+  -p, --ports <ports>       Target port list for TCP probe (e.g., 22,80,443; default: 22,80,443).
+  --vlan <vid>              Inject probes with IEEE 802.1Q VLAN tag (1-4094).
+  --qinq <s-tag,c-tag>      Inject probes with double-tagged QinQ headers (e.g., 100,200).
+  --auto-vlans              Automatically probe across all VLANs passively observed on link.
+  --rate <pps>              Maximum probe transmission rate in packets/sec (default: 50).
+  --timeout <sec>           Probe execution timeout in seconds (default: 5).
+  --audit-id <id>           Custom audit identifier for probe correlation (default: auto).
+
 Examples:
   sudo $0 on -i eth1 -o /data/trace
-  sudo $0 on -i sfp0,sfp1 -t sfp -o /data/trace -z -D 3600
+  sudo $0 on -i eth1 --mode active -o /data/trace
+  sudo $0 probe -i eth1 --arp-scan 192.168.1.0/24
+  sudo $0 probe -i eth1 --vlan 100 --arp-scan 10.100.1.0/24
+  sudo $0 probe -i eth1 --auto-vlans --arp-scan 10.0.0.0/24
+  sudo $0 probe -i eth1 --dhcp-discover
   $0 status -i eth1
   sudo $0 off -i eth1
   $0 analyze -d /data/trace

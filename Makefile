@@ -11,6 +11,7 @@ install:
 	install -d $(DESTDIR)$(LIBDIR)
 	install -m 755 bin/net-tap.sh $(DESTDIR)$(BINDIR)/net-tap
 	install -m 644 lib/*.sh $(DESTDIR)$(LIBDIR)/
+	install -m 755 lib/*.py $(DESTDIR)$(LIBDIR)/
 
 installcheck:
 	@echo "Checking installed net-tap binary..."
@@ -29,9 +30,9 @@ lint:
 		echo "Error: shellcheck is not installed. Failing lint step." >&2; \
 		exit 1; \
 	fi
-	@echo "Checking Python fixture generator syntax..."
+	@echo "Checking Python fixture generator and probe syntax..."
 	@if command -v python3 >/dev/null 2>&1; then \
-		python3 -B -c "import ast; ast.parse(open('tests/generate_carrier_fixtures.py').read())" && echo "Python syntax passed!"; \
+		python3 -B -c "import ast; ast.parse(open('tests/generate_carrier_fixtures.py').read()); ast.parse(open('lib/probe.py').read())" && echo "Python syntax passed!"; \
 	fi
 	@echo "Validating Draft-7 analysis JSON schema..."
 	@if command -v python3 >/dev/null 2>&1; then \

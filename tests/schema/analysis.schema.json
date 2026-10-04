@@ -201,6 +201,36 @@
         }
       },
       "additionalProperties": false
+    },
+    "active_audit": {
+      "type": "object",
+      "required": ["audit_files", "probes_sent", "responses_received", "vlans_probed", "discovered_hosts"],
+      "properties": {
+        "audit_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "probes_sent": { "type": "integer", "minimum": 0 },
+        "responses_received": { "type": "integer", "minimum": 0 },
+        "vlans_probed": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "discovered_hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ip", "mac", "vlan"],
+            "properties": {
+              "ip": { "type": "string" },
+              "mac": { "type": "string", "pattern": "^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$" },
+              "vlan": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

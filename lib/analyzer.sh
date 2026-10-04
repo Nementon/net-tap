@@ -727,6 +727,149 @@ analyze_session() {
         fi
     fi
 
+    # =========================================================================
+    # 7. ACTIVE AUDIT & TARGET PROBING CORRELATION
+    # =========================================================================
+    local audit_files=()
+    while IFS= read -r -d $'\0' af; do
+        audit_files+=("$af")
+    done < <(find "${target_dir}" -maxdepth 1 -name "*_probe_audit.jsonl" -print0 2>/dev/null | sort -z)
+
+    if [[ ${#audit_files[@]} -gt 0 ]]; then
+        python3 -B -c '
+import json, os, re, sys
+
+raw_paths = sys.argv[1].split("\0") if sys.argv[1] else []
+audit_paths = [p for p in raw_paths if p]
+dump_path = sys.argv[2]
+out_json = sys.argv[3]
+
+audit_files = []
+probes_sent = 0
+vlans_probed_set = set()
+probed_ips = set()
+probed_types = set()
+
+for p in audit_paths:
+    audit_files.append(os.path.basename(p))
+    try:
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    probes_sent += 1
+                    ptype = record.get("probe_type")
+                    if ptype:
+                        probed_types.add(ptype)
+                    target = record.get("target")
+                    if target:
+                        probed_ips.add(str(target))
+                    v = record.get("vlan")
+                    if v is not None:
+                        vlans_probed_set.add(str(v))
+                    else:
+                        vlans_probed_set.add("untagged")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+vlans_probed = sorted(list(vlans_probed_set), key=lambda x: (x != "untagged", int(x) if x.isdigit() else x))
+responses_received = 0
+discovered_hosts_dict = {}
+
+if os.path.exists(dump_path):
+    with open(dump_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            vlan_match = re.search(r"\bvlan\s+(\d+)\b", line)
+            pkt_vlan = vlan_match.group(1) if vlan_match else "untagged"
+
+            arp_match = re.search(r"Reply\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+is-at\s+([0-9a-fA-F:]{17})", line)
+            if arp_match:
+                ip = arp_match.group(1)
+                mac = arp_match.group(2).lower()
+                responses_received += 1
+                key = (ip, pkt_vlan)
+                if key not in discovered_hosts_dict:
+                    discovered_hosts_dict[key] = mac
+                continue
+
+            if "ICMP echo reply" in line or "need to frag" in line or "packet too big" in line:
+                responses_received += 1
+                continue
+
+            if "BOOTP/DHCP, Reply" in line or ("dhcp" in probed_types and "BOOTP/DHCP" in line and ">" in line):
+                dhcp_ip_m = re.search(r"Your-IP\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", line)
+                dhcp_mac_m = re.search(r"Client-Ethernet-Address\s+([0-9a-fA-F:]{17})", line)
+                if dhcp_ip_m and dhcp_mac_m:
+                    ip = dhcp_ip_m.group(1)
+                    mac = dhcp_mac_m.group(2).lower()
+                    key = (ip, pkt_vlan)
+                    discovered_hosts_dict[key] = mac
+                responses_received += 1
+                continue
+
+            if "Flags [S.]" in line or "Flags [R" in line:
+                for ip in probed_ips:
+                    if ip and f"{ip}." in line:
+                        responses_received += 1
+                        break
+                continue
+
+            if "neighbor advertisement" in line:
+                responses_received += 1
+                continue
+
+discovered_hosts = [
+    {"ip": ip, "mac": mac, "vlan": vlan}
+    for (ip, vlan), mac in sorted(discovered_hosts_dict.items())
+]
+
+result = {
+    "audit_files": audit_files,
+    "probes_sent": probes_sent,
+    "responses_received": responses_received,
+    "vlans_probed": vlans_probed,
+    "discovered_hosts": discovered_hosts
+}
+
+with open(out_json, "w", encoding="utf-8") as out_f:
+    json.dump(result, out_f, indent=2)
+' "$(printf "%s\0" "${audit_files[@]}")" "${dump_file}" "${TEMP_DIR}/active_audit.json" 2>/dev/null || true
+
+        echo -e "\n${C_BOLD}======================================================================${C_RESET}"
+        echo -e "${C_MAGENTA}${C_BOLD} [7] ACTIVE AUDIT & TARGET PROBING CORRELATION${C_RESET}"
+        echo -e "${C_BOLD}======================================================================${C_RESET}"
+
+        if [[ -f "${TEMP_DIR}/active_audit.json" ]]; then
+            local p_sent p_resp
+            p_sent=$(grep -o '"probes_sent": [0-9]*' "${TEMP_DIR}/active_audit.json" | awk '{print $2}')
+            p_resp=$(grep -o '"responses_received": [0-9]*' "${TEMP_DIR}/active_audit.json" | awk '{print $2}')
+            echo -e "  Audit Trail Logs     : ${C_BOLD}${#audit_files[@]}${C_RESET} audit file(s) found in capture dir"
+            echo -e "  Probes Transmitted   : ${C_CYAN}${C_BOLD}${p_sent:-0}${C_RESET} packet(s)"
+            echo -e "  Responses Received   : ${C_GREEN}${C_BOLD}${p_resp:-0}${C_RESET} packet(s)"
+
+            python3 -B -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    vlans = data.get("vlans_probed", [])
+    if vlans:
+        print(f"  VLAN Profiles Tested : {sys.argv[2]}{sys.argv[3]}" + ", ".join(vlans) + f"{sys.argv[4]}")
+    hosts = data.get("discovered_hosts", [])
+    if hosts:
+        print(f"\n  {sys.argv[5]}Discovered Responsive Hosts:{sys.argv[4]}")
+        for h in hosts:
+            print(f"    -> {sys.argv[3]}{h[\"ip\"]}{sys.argv[4]} [{h[\"mac\"]}] (VLAN: {h[\"vlan\"]})")
+except Exception:
+    pass
+' "${TEMP_DIR}/active_audit.json" "${C_CYAN}" "${C_BOLD}" "${C_RESET}" "${C_GREEN}" 2>/dev/null || true
+        fi
+    fi
+
     echo -e "\n${C_BOLD}======================================================================${C_RESET}"
     echo -e "${C_GREEN}${C_BOLD}                      ANALYSIS COMPLETE${C_RESET}"
     echo -e "${C_BOLD}======================================================================${C_RESET}\n"
@@ -833,7 +976,7 @@ analyze_session() {
     "dhcp_hostnames": $(to_jarr "$dhcp_hosts"),
     "dns_queries": $(to_jarr "$dns_names"),
     "tls_sni": $(to_jarr "$tls_sni")
-  }
+  }$(if [[ -f "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
 }
 EOF
     fi

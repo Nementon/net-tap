@@ -473,15 +473,31 @@ start_tap() {
             cmd_netns ip6tables -t raw -I OUTPUT -o "${iface}" -j DROP 2>/dev/null || true
         fi
 
-        # 4. Attach egress matchall drop filter across all protocols WHILE DOWN with priority 1
+        # 4. Attach egress drop filter across all protocols WHILE DOWN
         cmd_netns tc qdisc del dev "${iface}" clsact 2>/dev/null || true
-        if ! cmd_netns tc qdisc add dev "${iface}" clsact 2>/dev/null || \
-           ! cmd_netns tc filter add dev "${iface}" egress pref 1 protocol all matchall action drop 2>/dev/null; then
-            log_err "CRITICAL: Failed to attach zero-egress tc clsact drop filter to ${iface}!"
+        if ! cmd_netns tc qdisc add dev "${iface}" clsact 2>/dev/null; then
+            log_err "CRITICAL: Failed to attach tc clsact qdisc to ${iface}!"
             log_err "Aborting capture startup to prevent unshielded packet emission onto the wire."
             exit 1
         fi
-        log_ok "Egress packet drop filter active on ${iface}."
+
+        if [[ "${MODE:-passive}" == "active" ]]; then
+            # Active Probing Mode: Allow packets explicitly marked with SO_MARK 0x7a9 (fwmark 1961)
+            # and drop all other unsolicited host OS emissions (SLAAC, DAD, mDNS, etc.)
+            if ! cmd_netns tc filter add dev "${iface}" egress pref 10 protocol all handle 0x7a9 fw action pass 2>/dev/null || \
+               ! cmd_netns tc filter add dev "${iface}" egress pref 100 protocol all matchall action drop 2>/dev/null; then
+                log_err "CRITICAL: Failed to attach selective egress tc filters to ${iface}!"
+                exit 1
+            fi
+            log_ok "Selective egress filter active on ${iface} (fwmark 0x7a9 permitted, OS chatter dropped)."
+        else
+            if ! cmd_netns tc filter add dev "${iface}" egress pref 1 protocol all matchall action drop 2>/dev/null; then
+                log_err "CRITICAL: Failed to attach zero-egress tc clsact drop filter to ${iface}!"
+                log_err "Aborting capture startup to prevent unshielded packet emission onto the wire."
+                exit 1
+            fi
+            log_ok "Egress packet drop filter active on ${iface}."
+        fi
 
         # 5. Offload & MTU tuning: Disable coalescing to guarantee raw frame timing & raise MTU for 802.1Q/QinQ/VXLAN
         for feat in gro lro tso gso rx rxvlan rx-vlan-filter; do
@@ -625,7 +641,7 @@ start_tap() {
     tmp_state=$(mktemp "${STATE_DIR}/.state.XXXXXX")
     chmod 644 "${tmp_state}"
     {
-        declare -p IFACE HW_TYPE TIMESTAMP NETNS ROTATE_SIZE ROTATE_COUNT OUT_DIR
+        declare -p IFACE MODE HW_TYPE TIMESTAMP NETNS ROTATE_SIZE ROTATE_COUNT OUT_DIR
         declare -p PIDS_TCPDUMP PIDS_DMESG PIDS_IPMON PCAP_FILES DMESG_LOGS LINK_LOGS TCPDUMP_ERRS CONFIGURED_IFACES
         declare -p ORIG_PROMISC ORIG_ARP ORIG_IPV6_DISABLE ORIG_IPV6_KEEP_ADDR ORIG_IPV6_ADDR_GEN ORIG_IPV6_DAD ORIG_IPV6_DADT ORIG_IPV6_RA ORIG_IPV6_RS ORIG_IPV6_AUTOCONF ORIG_IPV6_TEMP ORIG_IPV6_EDAD ORIG_IPV6_NDISC ORIG_IPV6_REDIR
         declare -p ORIG_MLDV1_INTVAL ORIG_MLDV2_INTVAL ORIG_MLD_VER ORIG_DROP_UNA ORIG_ACCEPT_UNA ORIG_IPV6_FWD ORIG_IPV6_MC_FWD
@@ -669,7 +685,13 @@ render_status_dashboard() {
         fi
         echo -e "${C_BOLD}----------------------------------------------------------------------${C_RESET}"
     done
-    printf "%-22s: %s\n" "Egress Protection" "ACTIVE (tc clsact: 100% outbound traffic dropped)"
+    if [[ "${MODE:-passive}" == "active" ]]; then
+        printf "%-22s: %s\n" "Operational Mode" "ACTIVE (Audit Probing Mode)"
+        printf "%-22s: %s\n" "Egress Protection" "ACTIVE (tc selective: fwmark 0x7a9 pass, OS chatter dropped)"
+    else
+        printf "%-22s: %s\n" "Operational Mode" "PASSIVE (Zero-Egress Stealth)"
+        printf "%-22s: %s\n" "Egress Protection" "ACTIVE (tc clsact: 100% outbound traffic dropped)"
+    fi
     printf "%-22s: %s\n" "Dual-Stack Stealth" "ACTIVE (IPv4/IPv6 silent, conntrack NOTRACK enabled)"
     printf "%-22s: %s\n" "Session Start Time" "${TIMESTAMP}"
     if [[ -n "${DURATION}" ]]; then
@@ -933,6 +955,7 @@ status_tap() {
         fi
         
         echo -e "\n${C_BOLD}Active Tap Engine Session:${C_RESET}"
+        printf "  %-18s: %s\n" "Mode" "${MODE:-passive}"
         printf "  %-18s: %s\n" "Session Started" "${TIMESTAMP:-N/A}"
         printf "  %-18s: %s (PIDs: %s)\n" "tcpdump Status" "${tcpdump_status}" "${running_pids[*]:-N/A}"
         printf "  %-18s: %s (%d files, %s total)\n" "Capture Files" "${FILE_COUNT} files" "${FILE_COUNT}" "${TOTAL_SIZE}"

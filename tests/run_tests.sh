@@ -34,6 +34,7 @@ cleanup() {
         if [[ -n "${TEST_MULTI_DIR:-}" ]]; then rm -rf "${TEST_MULTI_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_DUR_DIR:-}" ]]; then rm -rf "${TEST_DUR_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_EAP_DIR:-}" ]]; then rm -rf "${TEST_EAP_DIR}" 2>/dev/null || true; fi
+        if [[ -n "${TEST_ACTIVE_DIR:-}" ]]; then rm -rf "${TEST_ACTIVE_DIR}" 2>/dev/null || true; fi
     else
         if [[ -n "${TEST_CAPTURE_DIR:-}" ]]; then
             echo "[DIAGNOSTIC] Preserving test capture dir for failure inspection: ${TEST_CAPTURE_DIR}" >&2
@@ -46,6 +47,9 @@ cleanup() {
         fi
         if [[ -n "${TEST_EAP_DIR:-}" ]]; then
             echo "[DIAGNOSTIC] Preserving EAP test dir for failure inspection: ${TEST_EAP_DIR}" >&2
+        fi
+        if [[ -n "${TEST_ACTIVE_DIR:-}" ]]; then
+            echo "[DIAGNOSTIC] Preserving active audit dir for failure inspection: ${TEST_ACTIVE_DIR}" >&2
         fi
     fi
     if [[ -n "${WPA_PID_FILE:-}" && -f "${WPA_PID_FILE}" ]]; then
@@ -117,6 +121,7 @@ assert_fail "Unknown action" "$BIN_PATH" foobar
 assert_fail "required" "$BIN_PATH" status
 assert_fail "(required|requires root privileges)" "$BIN_PATH" on
 assert_fail "(required|requires root privileges)" "$BIN_PATH" off
+assert_fail "(required|requires root privileges)" "$BIN_PATH" probe
 
 # --- 2. Input Validation Tests ---
 assert_fail "Invalid interface name format" "$BIN_PATH" status -i "bad;name"
@@ -135,11 +140,20 @@ assert_fail "Duration must be a positive integer in seconds" "$BIN_PATH" on -i l
 assert_fail "Disk threshold must be an integer" "$BIN_PATH" on -i lo -w "150"
 assert_fail "Disk threshold must be an integer" "$BIN_PATH" on -i lo -w "0"
 assert_fail "Hardware type must be" "$BIN_PATH" on -i lo -t "invalidtype"
+assert_fail "Operational mode must be 'passive' or 'active'" "$BIN_PATH" on -i lo --mode "invalidmode"
+assert_fail "Probe rate must be a positive integer" "$BIN_PATH" probe -i lo --arp-scan --rate 0
+assert_fail "Probe rate must be a positive integer" "$BIN_PATH" probe -i lo --arp-scan --rate "notanumber"
+assert_fail "Probe timeout must be a positive integer in seconds" "$BIN_PATH" probe -i lo --arp-scan --timeout 0
+assert_fail "Probe timeout must be a positive integer in seconds" "$BIN_PATH" probe -i lo --arp-scan --timeout "notanumber"
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan 5000
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan 0
+assert_fail "QinQ tags must be in format 's_tag,c_tag'" "$BIN_PATH" probe -i lo --arp-scan --qinq "badqinq"
 
 # --- 3. Privilege Checks ---
 if [[ $EUID -ne 0 ]]; then
     assert_fail "requires root privileges" "$BIN_PATH" on -i lo
     assert_fail "requires root privileges" "$BIN_PATH" off -i lo
+    assert_fail "requires root privileges" "$BIN_PATH" probe -i lo --arp-scan
 else
     # We are root; test that non-root user is rejected by staging into /tmp
     if command -v su >/dev/null 2>&1 && id -u nobody >/dev/null 2>&1; then
@@ -450,6 +464,92 @@ except jsonschema.ValidationError:
             PASSED=$((PASSED + 1))
         else
             echo "FAILED (Schema failed to reject out-of-range VLAN ID 4096)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        # Validate Schema Acceptance of valid active_audit block
+        echo -n "[TEST] Validating schema acceptance of valid active_audit block... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['20261004_test_veth-tap_probe_audit.jsonl'],
+    'probes_sent': 10,
+    'responses_received': 2,
+    'vlans_probed': ['untagged', '100'],
+    'discovered_hosts': [
+        {'ip': '192.0.2.1', 'mac': '02:00:00:11:22:33', 'vlan': 'untagged'},
+        {'ip': '10.100.1.1', 'mac': '02:00:00:44:55:66', 'vlan': '100'}
+    ]
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(0)
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema rejected valid active_audit block)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        # Validate Schema Rejection of invalid MAC in active_audit
+        echo -n "[TEST] Validating schema rejection of invalid MAC format in active_audit... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged'],
+    'discovered_hosts': [
+        {'ip': '192.0.2.1', 'mac': 'bad-mac-str', 'vlan': 'untagged'}
+    ]
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject invalid MAC in discovered_hosts)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        # Validate Schema Rejection of missing required field in active_audit
+        echo -n "[TEST] Validating schema rejection of missing required field in active_audit... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged']
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject missing required field in active_audit)"
             FAILED=$((FAILED + 1))
         fi
 
@@ -810,8 +910,8 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
     
     echo -n "[TEST] Waiting for auto-shutdown worker to complete... "
     shutdown_success=0
-    for _ in $(seq 1 30); do
-        if ! "$BIN_PATH" status -n "${TEST_NS}" -i veth-tap1 2>&1 | grep -qi "ACTIVE"; then
+    for _ in $(seq 1 40); do
+        if "$BIN_PATH" status -n "${TEST_NS}" -i veth-tap1 2>&1 | grep -qi "Not running"; then
             shutdown_success=1
             break
         fi
@@ -825,10 +925,148 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
         FAILED=$((FAILED + 1))
         "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap1 >/dev/null 2>&1 || true
     fi
+    "$BIN_PATH" off -n "${TEST_NS}" -i "veth-tap1,veth-tap2" >/dev/null 2>&1 || true
     rm -rf "${TEST_DUR_DIR}" 2>/dev/null || true
     TEST_DUR_DIR=""
+    sleep 0.3
 
-    # 6.10 Fallback Teardown on Nonexistent State File
+    # 6.10 Active Probing & Selective Egress Verification (--mode active & probe)
+    echo "[TEST] Running active probing & selective egress verification (--mode active & probe)..."
+    TEST_ACTIVE_DIR=$(mktemp -d /tmp/net-tap-test-active.XXXXXX)
+    ip netns exec "${TEST_NS}" ip link set dev veth-peer up
+
+    # 6.10a Attempting probe on passive mode tap session must be rejected
+    assert_success "$BIN_PATH" on -n "${TEST_NS}" -i veth-tap -o "${TEST_ACTIVE_DIR}"
+    assert_fail "running in PASSIVE mode" "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --arp-scan 192.0.2.0/24
+    assert_success "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap
+    rm -rf "${TEST_ACTIVE_DIR:?}"/* 2>/dev/null || true
+
+    # 6.10b Start tap in active mode
+    assert_success "$BIN_PATH" on -n "${TEST_NS}" -i veth-tap --mode active -o "${TEST_ACTIVE_DIR}"
+
+    # Verify status reflects active mode
+    echo -n "[TEST] Verifying status reflects active operational mode... "
+    STATUS_MODE=$("$BIN_PATH" status -n "${TEST_NS}" -i veth-tap 2>&1 || true)
+    if echo "${STATUS_MODE}" | grep -iE "Mode\s*:\s*active"; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (status did not display active mode)"
+        FAILED=$((FAILED + 1))
+    fi
+
+    # Verify unmarked host traffic is still dropped by tc in active mode
+    echo -n "[TEST] Verifying unmarked host egress frames dropped in active mode... "
+    PRE_ACTIVE_DROP=$(ip netns exec "${TEST_NS}" tc -s filter show dev veth-tap egress 2>/dev/null | awk '/dropped/ {gsub(/,/, "", $7); sum += $7} END {print sum+0}')
+    if command -v python3 >/dev/null 2>&1; then
+        ip netns exec "${TEST_NS}" python3 -c "from scapy.all import sendp, Ether, IP, ICMP; sendp(Ether()/IP(dst='192.0.2.1')/ICMP(), iface='veth-tap', count=1, verbose=0)" 2>/dev/null || true
+    fi
+    POST_ACTIVE_DROP=$(ip netns exec "${TEST_NS}" tc -s filter show dev veth-tap egress 2>/dev/null | awk '/dropped/ {gsub(/,/, "", $7); sum += $7} END {print sum+0}')
+    if [[ "${POST_ACTIVE_DROP}" -gt "${PRE_ACTIVE_DROP}" ]]; then
+        echo "PASSED (unmarked host packet dropped by tc)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (unmarked host packet was not dropped)"
+        FAILED=$((FAILED + 1))
+    fi
+
+    # Start responder on veth-peer in python
+    ip netns exec "${TEST_NS}" python3 -c "
+import sys, time
+from scapy.all import sniff, sendp, Ether, Dot1Q, ARP, IP, ICMP, TCP, UDP, BOOTP, DHCP
+
+def process_pkt(pkt):
+    reply = None
+    if pkt.haslayer(ARP) and pkt[ARP].op == 1:
+        if pkt.haslayer(Dot1Q) and pkt[Dot1Q].vlan == 100:
+            if pkt[ARP].pdst == '10.100.1.1':
+                reply = Ether(src='02:00:00:10:01:01', dst=pkt[Ether].src) / Dot1Q(vlan=100) / ARP(op=2, hwsrc='02:00:00:10:01:01', psrc='10.100.1.1', hwdst=pkt[ARP].hwsrc, pdst=pkt[ARP].psrc)
+        elif not pkt.haslayer(Dot1Q):
+            if pkt[ARP].pdst == '192.0.2.99':
+                reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / ARP(op=2, hwsrc='02:00:00:88:99:aa', psrc='192.0.2.99', hwdst=pkt[ARP].hwsrc, pdst=pkt[ARP].psrc)
+    elif pkt.haslayer(ICMP) and pkt[ICMP].type == 8:
+        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src=pkt[IP].dst, dst=pkt[IP].src) / ICMP(type=0, id=pkt[ICMP].id, seq=pkt[ICMP].seq)
+    elif pkt.haslayer(TCP) and pkt[TCP].flags == 'S':
+        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src=pkt[IP].dst, dst=pkt[IP].src) / TCP(sport=pkt[TCP].dport, dport=pkt[TCP].sport, flags='SA', seq=1000, ack=pkt[TCP].seq+1)
+    elif pkt.haslayer(DHCP) and pkt.haslayer(BOOTP):
+        bootp = pkt[BOOTP]
+        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src='192.0.2.254', dst='255.255.255.255') / UDP(sport=67, dport=68) / BOOTP(op=2, yiaddr='192.0.2.50', siaddr='192.0.2.254', chaddr=bootp.chaddr, xid=bootp.xid) / DHCP(options=[('message-type', 'offer'), ('server_id', '192.0.2.254'), 'end'])
+
+    if reply is not None:
+        sendp(reply, iface='veth-peer', count=1, verbose=0)
+
+sniff(iface='veth-peer', timeout=10, prn=process_pkt)
+" &
+    RESP_PID=$!
+    sleep 0.4
+
+    # Execute active probes
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --arp-scan 192.0.2.99/32 --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --vlan 100 --arp-scan 10.100.1.1/32 --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --auto-vlans --arp-scan 10.100.1.1/32 --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --dhcp-discover
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --icmp-pmtu 192.0.2.99
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --tcp-syn 192.0.2.99 -p 80,443
+
+    kill "${RESP_PID}" 2>/dev/null || true
+    wait "${RESP_PID}" 2>/dev/null || true
+
+    # Stop active tap session
+    assert_success "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap
+
+    # Verify audit file was created
+    echo -n "[TEST] Verifying audit JSONL log file created... "
+    if compgen -G "${TEST_ACTIVE_DIR}/*probe_audit.jsonl" > /dev/null; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (no probe audit log found)"
+        FAILED=$((FAILED + 1))
+    fi
+
+    # Run analyzer on active capture session and validate schema
+    echo -n "[TEST] Validating analyzer JSON schema on active probing session... "
+    ACTIVE_JSON=$("$BIN_PATH" analyze -d "${TEST_ACTIVE_DIR}" --json 2>/dev/null || echo "{}")
+    if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    assert 'active_audit' in data
+    assert data['active_audit']['probes_sent'] > 0
+    assert data['active_audit']['responses_received'] >= 2
+    assert len(data['active_audit']['discovered_hosts']) >= 2
+    sys.exit(0)
+except Exception as e:
+    sys.stderr.write(f'Validation failed: {e}\n')
+    sys.exit(1)
+" "${ACTIVE_JSON}" 2>&1; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (active audit JSON output failed schema validation)"
+        FAILED=$((FAILED + 1))
+    fi
+
+    # Verify terminal output contains Section [7] Active Audit Correlation
+    echo -n "[TEST] Verifying human-readable active audit correlation in analyzer report... "
+    ACTIVE_TXT=$("$BIN_PATH" analyze -d "${TEST_ACTIVE_DIR}" 2>/dev/null || echo "")
+    if echo "${ACTIVE_TXT}" | grep -q "\[7\] ACTIVE AUDIT & TARGET PROBING CORRELATION" && \
+       echo "${ACTIVE_TXT}" | grep -q "192.0.2.99" && \
+       echo "${ACTIVE_TXT}" | grep -q "10.100.1.1"; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (human-readable report missing expected active audit correlation)"
+        FAILED=$((FAILED + 1))
+    fi
+
+    rm -rf "${TEST_ACTIVE_DIR}" 2>/dev/null || true
+    TEST_ACTIVE_DIR=""
+
+    # 6.11 Fallback Teardown on Nonexistent State File
     echo -n "[TEST] Verifying fallback teardown on nonexistent state file... "
     if "$BIN_PATH" off -n "${TEST_NS}" -i dummy99 >/dev/null 2>&1; then
         echo "PASSED"

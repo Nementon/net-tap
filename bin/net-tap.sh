@@ -28,7 +28,8 @@ fi
 if [[ $EUID -eq 0 ]]; then
     lib_owner=$(stat -c "%u" "${LIB_DIR}" 2>/dev/null || echo "-1")
     lib_perm=$(stat -c "%a" "${LIB_DIR}" 2>/dev/null || echo "777")
-    if [[ "${lib_owner}" -ne 0 && "${lib_owner}" -ne "${SUDO_UID:-0}" && "${lib_owner}" -ne "${EUID}" ]] || [[ "${lib_perm: -1}" =~ [2367] ]]; then
+    script_owner=$(stat -c "%u" "${SCRIPT_DIR}" 2>/dev/null || echo "-1")
+    if [[ "${lib_owner}" -ne 0 && "${lib_owner}" -ne "${SUDO_UID:-0}" && "${lib_owner}" -ne "${script_owner}" && "${lib_owner}" -ne "${EUID}" ]] || [[ "${lib_perm: -1}" =~ [2367] ]]; then
         echo "ERROR: Untrusted library directory '${LIB_DIR}' must be owned by root (or invoking user) and not writable by other users!" >&2
         exit 1
     fi
@@ -81,6 +82,9 @@ main() {
     PROBE_SRC_IP6=""
     PROBE_SRC_MAC=""
     PROBE_COMMUNITY="public"
+    PROBE_PCP=""
+    PROBE_DEI=""
+    PROBE_QINQ_TPID=""
 
     SCRIPT_PATH=$(readlink -f "$0")
 
@@ -282,6 +286,21 @@ main() {
                 PROBE_AUDIT_ID="$2"
                 shift 2
                 ;;
+            --pcp)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_PCP="$2"
+                shift 2
+                ;;
+            --dei)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_DEI="$2"
+                shift 2
+                ;;
+            --qinq-tpid)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_QINQ_TPID="$2"
+                shift 2
+                ;;
             -h|--help)
                 usage 0
                 ;;
@@ -360,8 +379,19 @@ main() {
             exit 1
         fi
         if [[ -n "${PROBE_SRC_IP}" ]]; then
-            if ! [[ "${PROBE_SRC_IP}" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            if ! [[ "${PROBE_SRC_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
                 log_err "Invalid source IPv4 address format: '${PROBE_SRC_IP}'."
+                exit 1
+            fi
+            IFS='.' read -r o1 o2 o3 o4 <<< "${PROBE_SRC_IP}"
+            if [[ "$o1" -gt 255 || "$o2" -gt 255 || "$o3" -gt 255 || "$o4" -gt 255 ]]; then
+                log_err "IPv4 octets must be between 0 and 255: '${PROBE_SRC_IP}'."
+                exit 1
+            fi
+        fi
+        if [[ -n "${PROBE_SRC_IP6}" ]]; then
+            if ! [[ "${PROBE_SRC_IP6}" =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]]; then
+                log_err "Invalid source IPv6 address format: '${PROBE_SRC_IP6}'."
                 exit 1
             fi
         fi
@@ -375,9 +405,35 @@ main() {
             log_err "Probe rate must be a positive integer."
             exit 1
         fi
+        if [[ "${PROBE_RATE}" -gt 5000 ]]; then
+            log_err "Probe rate exceeds safety limit (maximum 5000 pps)."
+            exit 1
+        fi
+        if [[ "${PROBE_TYPE}" =~ ^(arp|dhcp)$ && "${PROBE_RATE}" -gt 1000 ]]; then
+            log_err "Broadcast probe rate exceeds safety limit (maximum 1000 pps for ${PROBE_TYPE})."
+            exit 1
+        fi
         if ! [[ "${PROBE_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
             log_err "Probe timeout must be a positive integer in seconds."
             exit 1
+        fi
+        if [[ -n "${PROBE_PCP}" ]]; then
+            if ! [[ "${PROBE_PCP}" =~ ^[0-7]$ ]]; then
+                log_err "PCP must be an integer between 0 and 7."
+                exit 1
+            fi
+        fi
+        if [[ -n "${PROBE_DEI}" ]]; then
+            if ! [[ "${PROBE_DEI}" =~ ^[01]$ ]]; then
+                log_err "DEI must be 0 or 1."
+                exit 1
+            fi
+        fi
+        if [[ -n "${PROBE_QINQ_TPID}" ]]; then
+            if ! [[ "${PROBE_QINQ_TPID}" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$ ]]; then
+                log_err "QinQ TPID must be a hex or decimal integer (e.g. 0x88a8)."
+                exit 1
+            fi
         fi
         if [[ -n "${PROBE_VLAN}" ]]; then
             if ! [[ "${PROBE_VLAN}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then

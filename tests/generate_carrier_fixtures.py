@@ -11,12 +11,14 @@ try:
         Ether, Dot1Q, IP, IPv6, TCP, UDP, ARP, ICMP, ICMPv6ND_RA, ICMPv6NDOptPrefixInfo,
         ICMPv6NDOptSrcLLAddr, ICMPv6NDOptMTU, ICMPv6NDOptRDNSS, ICMPv6ND_NS, ICMPv6ND_NA,
         ICMPv6ND_RS, ICMPv6PacketTooBig, ICMPv6ND_Redirect,
-        VXLAN, STP, Dot3, LLC, SNAP, wrpcap, Raw, DNS, DNSQR
+        VXLAN, STP, Dot3, LLC, SNAP, wrpcap, Raw, DNS, DNSQR,
+        RouterAlert, IPv6ExtHdrHopByHop
     )
+    from scapy.layers.inet6 import ICMPv6MLReport2, ICMPv6MLDMultAddrRec
     from scapy.layers.tls.all import TLS, TLSClientHello, TLS_Ext_ServerName, ServerName
     from scapy.layers.sctp import SCTP, SCTPChunkHeartbeatReq, SCTPChunkParamHeartbeatInfo
     from scapy.contrib.isis import ISIS_CommonHdr, ISIS_P2P_Hello
-    from scapy.contrib.ospf import OSPF_Hdr, OSPF_Hello, OSPF_LSUpd, OSPF_Router_LSA
+    from scapy.contrib.ospf import OSPF_Hdr, OSPF_Hello, OSPF_LSUpd, OSPF_Router_LSA, OSPFv3_Hdr, OSPFv3_Hello
 except ImportError as err:
     sys.stderr.write(f"ERROR: Scapy is required to generate test fixtures ({err}).\n")
     sys.stderr.write("Install scapy via: pip install scapy or apt-get install python3-scapy\n")
@@ -57,6 +59,18 @@ packets.append(Dot3(src="00:11:22:33:44:55", dst="01:80:c2:00:00:00") / LLC(dsap
 eapol_req = b"\x01\x00\x00\x05\x01\x01\x00\x05\x01"  # Version 1, Type 0 (EAP-Packet), Len 5, Code 1 (Request), Id 1, Len 5, Type 1 (Identity)
 packets.append(Ether(src="02:00:00:00:00:aa", dst="01:80:c2:00:00:03", type=0x888e) / Raw(load=eapol_req))
 
+# 5b. Ethernet OAM CFM CCM (IEEE 802.1ag / ITU-T Y.1731 - EtherType 0x8902)
+# CCM PDU: Level 4, OpCode 1 (CCM), Flags 4 (1s interval), First TLV Offset 70
+cfm_ccm = (
+    b"\x80\x01\x04\x46" +
+    b"\x00\x00\x00\x01" +
+    b"\x00\x01" +
+    b"\x01\x04corp\x02\x08carrier1" + b"\x00" * 32 +
+    b"\x00" * 16 +
+    b"\x00"
+)
+packets.append(Ether(src="02:00:00:00:00:01", dst="01:80:c2:00:00:34", type=0x8902) / Raw(load=cfm_ccm))
+
 # 6. IPv6 SLAAC Router Advertisement (RFC 4861) with MTU and RDNSS options
 ra = (
     Ether(src="02:00:00:00:00:fe", dst="33:33:00:00:00:01") /
@@ -91,6 +105,9 @@ packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(sr
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::201", dst="2001:db8:beef::1", nh=44) / Raw(load=b"\x11\x00\x00\x00\x00\x00\x12\x34") / UDP(sport=5002, dport=5002) / Raw(load=b"frag_payload"))
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::202", dst="2001:db8:beef::1", nh=50) / Raw(load=b"\x00\x00\x10\x00\x00\x00\x00\x01\x11\x22\x33\x44\x55\x66\x77\x88"))
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::203", dst="2001:db8:beef::1", nh=51) / Raw(load=b"\x3b\x01\x00\x00\x00\x00\x10\x00\x00\x00\x00\x01\x11\x22\x33\x44"))
+
+# 7f. MLDv2 Multicast Listener Report (RFC 3810, ICMPv6 Type 143 to ff02::16)
+packets.append(Ether(src="02:00:00:00:00:01", dst="33:33:00:00:00:16") / IPv6(src="fe80::100", dst="ff02::16", hlim=1) / ICMPv6MLReport2(records=[ICMPv6MLDMultAddrRec(rtype=4, dst="ff02::1:ff00:1")]))
 
 
 # 8. FHRP: VRRPv2 (IP Proto 112) & HSRP (UDP 1985)
@@ -165,17 +182,13 @@ snmp_raw = b"\x30\x26\x02\x01\x01\x04\x06public\xa0\x19\x02\x04\x12\x34\x56\x78\
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254") / UDP(sport=50001, dport=161) / Raw(load=snmp_raw))
 
 # 15. OSPFv2 Hello (Router ID: 10.255.255.1) and OSPFv2 LS Update (Adv Router: 10.255.255.2)
-ospf_hdr = b"\x02\x01\x00\x2c\x0a\xff\xff\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-ospf_body = b"\xff\xff\xff\x00\x00\x0a\x02\x01\x00\x00\x00\x28\x0a\x0a\x01\x01\x00\x00\x00\x00"
-packets.append(Ether(src="02:00:00:00:00:01", dst="01:00:5e:00:00:05") / IP(src="10.10.1.1", dst="224.0.0.5", proto=89, ttl=1) / Raw(load=ospf_hdr + ospf_body))
+packets.append(Ether(src="02:00:00:00:00:01", dst="01:00:5e:00:00:05") / IP(src="10.10.1.1", dst="224.0.0.5", proto=89, ttl=1) / OSPF_Hdr(src="10.255.255.1") / OSPF_Hello(router="10.255.255.1", backup="10.10.1.1"))
 
 # OSPFv2 Link State Update with LSA Header (Adv Router: 10.255.255.2)
 packets.append(Ether(src="02:00:00:00:00:01", dst="01:00:5e:00:00:05") / IP(src="10.10.1.1", dst="224.0.0.5", proto=89, ttl=1) / OSPF_Hdr(src="10.255.255.1") / OSPF_LSUpd(lsalist=[OSPF_Router_LSA(adrouter="10.255.255.2")]))
 
 # 15b. OSPFv3 Hello over IPv6 (Router ID: 10.255.255.3)
-ospfv3_hdr = b"\x03\x01\x00\x24\x0a\xff\xff\x03\x00\x00\x00\x00\x00\x00\x00\x00"
-ospfv3_body = b"\x00\x00\x00\x01\x01\x00\x00\x13\x00\x0a\x00\x28\x00\x00\x00\x00\x00\x00\x00\x00"
-packets.append(Ether(src="02:00:00:00:00:01", dst="33:33:00:00:00:05") / IPv6(src="fe80::100", dst="ff02::5", nh=89) / Raw(load=ospfv3_hdr + ospfv3_body))
+packets.append(Ether(src="02:00:00:00:00:01", dst="33:33:00:00:00:05") / IPv6(src="fe80::100", dst="ff02::5") / OSPFv3_Hdr(src="10.255.255.3") / OSPFv3_Hello())
 
 # 16. BGP OPEN (My AS: 65001 with 4-byte AS capability) and BGP UPDATE (AS_PATH: 65002)
 # Length: 45 bytes (19 fixed + 10 body + 16 opt params), Opt Parm Len: 16
@@ -198,6 +211,10 @@ bgp_upd = (
     b"\x40\x03\x04\x0a\x0a\x01\x01"
 )
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=51790, dport=179, flags="PA", seq=46, ack=1) / Raw(load=bgp_upd))
+
+# 16b. BGP KEEPALIVE (19-byte message: marker 16B + len 2B=19 + type 1B=4)
+bgp_keepalive = b"\xff" * 16 + b"\x00\x13\x04"
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=51790, dport=179, flags="PA", seq=89, ack=1) / Raw(load=bgp_keepalive))
 
 # 17. TLS 1.2 ClientHello with SNI (login.microsoftonline.com)
 tls_pkt = (

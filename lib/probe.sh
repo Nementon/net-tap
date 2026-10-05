@@ -49,6 +49,10 @@ run_probe() {
         exit 1
     fi
 
+    acquire_lock "${IFACE}"
+    # shellcheck disable=SC2064
+    trap 'release_lock' EXIT INT TERM
+
     local audit_id="${PROBE_AUDIT_ID:-probe_$(date +%s)_$$}"
     local audit_file="${OUT_DIR}/${TIMESTAMP}_${safe_iface}_probe_audit.jsonl"
 
@@ -60,9 +64,9 @@ run_probe() {
             [[ -f "${pf}" ]] || continue
             local v=""
             if [[ "${pf}" =~ \.gz$ ]]; then
-                v=$(gzip -dc "${pf}" 2>/dev/null | tcpdump -nn -e -r - 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
+                v=$(gzip -dc "${pf}" 2>/dev/null | tcpdump -nn -e -c 10000 -r - 'vlan' 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
             else
-                v=$(tcpdump -nn -e -r "${pf}" 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
+                v=$(tcpdump -nn -e -c 10000 -r "${pf}" 'vlan' 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
             fi
             if [[ -n "${v}" ]]; then
                 discovered_vlans="${discovered_vlans}"$'\n'"${v}"
@@ -86,6 +90,8 @@ run_probe() {
 
     if [[ ! -f "${probe_py}" ]]; then
         log_err "Could not locate probe.py engine in ${LIB_DIR}!"
+        release_lock
+        trap - EXIT INT TERM
         exit 1
     fi
 
@@ -98,8 +104,18 @@ run_probe() {
     [[ -n "${PROBE_SRC_IP6:-}" ]] && cmd+=(--src-ip6 "${PROBE_SRC_IP6}")
     [[ -n "${PROBE_SRC_MAC:-}" ]] && cmd+=(--src-mac "${PROBE_SRC_MAC}")
     [[ -n "${PROBE_COMMUNITY:-}" ]] && cmd+=(--community "${PROBE_COMMUNITY}")
+    [[ -n "${PROBE_PCP:-}" ]] && cmd+=(--pcp "${PROBE_PCP}")
+    [[ -n "${PROBE_DEI:-}" ]] && cmd+=(--dei "${PROBE_DEI}")
+    [[ -n "${PROBE_QINQ_TPID:-}" ]] && cmd+=(--qinq-tpid "${PROBE_QINQ_TPID}")
 
     log_info "Launching ${PROBE_TYPE^^} probe on ${IFACE} (rate: ${PROBE_RATE:-50} pps)..."
     cmd_netns "${cmd[@]}"
+    local probe_rc=$?
+    trap - EXIT INT TERM
+    release_lock
+    if [[ ${probe_rc} -ne 0 ]]; then
+        log_err "Probe execution failed (exit code ${probe_rc})."
+        return ${probe_rc}
+    fi
     log_ok "Probe completed. Audit trail appended to: ${audit_file}"
 }

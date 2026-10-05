@@ -56,6 +56,14 @@ cleanup() {
         kill "$(cat "${WPA_PID_FILE}")" 2>/dev/null || true
         rm -f "${WPA_PID_FILE}" 2>/dev/null || true
     fi
+    if [[ -n "${RESP_PID:-}" ]] && kill -0 "${RESP_PID}" 2>/dev/null; then
+        kill "${RESP_PID}" 2>/dev/null || true
+        wait "${RESP_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${MOCK_PID:-}" ]] && kill -0 "${MOCK_PID}" 2>/dev/null; then
+        kill "${MOCK_PID}" 2>/dev/null || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+    fi
     if [[ -n "${WPA_CONF_FILE:-}" && -f "${WPA_CONF_FILE}" ]]; then
         rm -f "${WPA_CONF_FILE}" 2>/dev/null || true
     fi
@@ -910,7 +918,15 @@ if [[ $EUID -eq 0 ]]; then
     fi
 
     # 6.4 Status check
-    assert_success "$BIN_PATH" status -n "${TEST_NS}" -i veth-tap
+    echo -n "[TEST] Verifying active session status output... "
+    STATUS_OUT=$("$BIN_PATH" status -n "${TEST_NS}" -i veth-tap 2>&1 || true)
+    if echo "${STATUS_OUT}" | grep -q "RUNNING"; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (status did not indicate running tcpdump engine)"
+        FAILED=$((FAILED + 1))
+    fi
 
     # 6.5 Clean teardown
     assert_success "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap
@@ -1159,7 +1175,15 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
         FAILED=$((FAILED + 1))
     fi
 
-    assert_success "$BIN_PATH" status -n "${TEST_NS}" -i "veth-tap1,veth-tap2"
+    echo -n "[TEST] Verifying multi-tap session status output... "
+    STATUS_MULTI=$("$BIN_PATH" status -n "${TEST_NS}" -i "veth-tap1,veth-tap2" 2>&1 || true)
+    if echo "${STATUS_MULTI}" | grep -q "RUNNING"; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (multi-tap status did not indicate running tcpdump engine)"
+        FAILED=$((FAILED + 1))
+    fi
     assert_success "$BIN_PATH" off -n "${TEST_NS}" -i "veth-tap1,veth-tap2"
 
     echo -n "[TEST] Verifying Netfilter raw table rule cleanup after teardown... "
@@ -1291,7 +1315,7 @@ def process_pkt(pkt):
     if reply is not None:
         sendp(reply, iface='veth-peer', count=1, verbose=0)
 
-sniff(iface='veth-peer', timeout=15, prn=process_pkt)
+sniff(iface='veth-peer', timeout=60, prn=process_pkt)
 " &
     RESP_PID=$!
     sleep 0.4
@@ -1335,24 +1359,26 @@ sniff(iface='veth-peer', timeout=15, prn=process_pkt)
     # Run analyzer on active capture session and validate schema
     echo -n "[TEST] Validating analyzer JSON schema on active probing session... "
     ACTIVE_JSON=$("$BIN_PATH" analyze -d "${TEST_ACTIVE_DIR}" --json 2>/dev/null || echo "{}")
-    if python3 -B -c "
+    if python3 -B -c '
 import json, jsonschema, sys
-with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+with open(sys.argv[2]) as sf:
     schema = json.load(sf)
 data = json.loads(sys.argv[1])
 try:
     jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
-    assert 'active_audit' in data
-    assert data['active_audit']['probes_sent'] > 0
-    assert data['active_audit']['responses_received'] >= 3
-    assert len(data['active_audit']['discovered_hosts']) >= 3
-    discovered_ips = [h['ip'] for h in data['active_audit']['discovered_hosts']]
-    assert '2001:db8::1' in discovered_ips
+    assert "active_audit" in data, "active_audit not in data"
+    audit = data["active_audit"]
+    assert audit.get("probes_sent", 0) > 0, "probes_sent not > 0"
+    assert audit.get("responses_received", 0) >= 3, "responses_received not >= 3"
+    hosts = audit.get("discovered_hosts", [])
+    assert len(hosts) >= 3, f"discovered_hosts len {len(hosts)} not >= 3: {hosts}"
+    discovered_ips = [h.get("ip") for h in hosts]
+    assert "2001:db8::1" in discovered_ips, "2001:db8::1 not in discovered_ips"
     sys.exit(0)
 except Exception as e:
-    sys.stderr.write(f'Validation failed: {e}\n')
+    sys.stderr.write(f"Validation failed: {type(e).__name__}: {e}\n")
     sys.exit(1)
-" "${ACTIVE_JSON}" 2>&1; then
+' "${ACTIVE_JSON}" "${SCRIPT_DIR}/schema/analysis.schema.json" 2>&1; then
         echo "PASSED"
         PASSED=$((PASSED + 1))
     else

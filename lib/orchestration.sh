@@ -164,7 +164,7 @@ _autoshutdown_worker() {
 }
 
 _disk_watchdog_worker() {
-    local thresh="$1" outdir="$2" ifc="$3" ns="${4:-}" script="${5:-$(readlink -f "$0")}" stfile="$6" rot_count="${7:-10}" capture_pids="${8:-}"
+    local thresh="$1" outdir="$2" ifc="$3" ns="${4:-}" script="${5:-$(readlink -f "$0")}" stfile="$6" rot_count="${7:-10}" capture_pids="${8:-}" session_ts="${9:-}"
     local sleep_pid=""
     trap '[[ -n "${sleep_pid}" ]] && kill -TERM "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT HUP EXIT
     for fd_path in /proc/self/fd/*; do
@@ -183,9 +183,13 @@ _disk_watchdog_worker() {
         IFS=',' read -ra ifc_arr <<< "${ifc}"
         for dev in "${ifc_arr[@]}"; do
             local chunk_files=()
+            local pattern="${outdir}/*_${dev}_trace.pcap*"
+            if [[ -n "${session_ts}" ]]; then
+                pattern="${outdir}/${session_ts}_${dev}_trace.pcap*"
+            fi
             while IFS= read -r f; do
                 [[ -f "$f" ]] && chunk_files+=("$f")
-            done < <(ls -1t "${outdir}"/*_"${dev}"_trace.pcap* 2>/dev/null || true)
+            done < <(ls -1t ${pattern} 2>/dev/null || true)
             if [[ ${#chunk_files[@]} -gt ${rot_count} ]]; then
                 for ((idx=rot_count; idx<${#chunk_files[@]}; idx++)); do
                     rm -f "${chunk_files[$idx]}" 2>/dev/null || true
@@ -211,11 +215,14 @@ _disk_watchdog_worker() {
             fi
         fi
 
-        local df_stats current_usage avail_mb
-        df_stats=$(df -Pm "${outdir}" 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5, $4}')
-        read -r current_usage avail_mb <<< "${df_stats:-0 999999}"
-        if [[ "${current_usage}" -ge "${thresh}" ]] || [[ "${avail_mb}" -le 1024 ]]; then
-            if command -v logger >/dev/null 2>&1; then logger -t net-tap "CRITICAL: Storage threshold reached (${current_usage}% >= ${thresh}% or ${avail_mb}MB <= 1024MB). Triggering emergency shutdown for ${ifc}."; fi
+        local df_stats current_usage avail_mb total_mb
+        df_stats=$(df -Pm "${outdir}" 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5, $4, $2}')
+        read -r current_usage avail_mb total_mb <<< "${df_stats:-0 999999 1000000}"
+        local min_headroom=$(( total_mb / 20 ))
+        [[ $min_headroom -gt 1024 ]] && min_headroom=1024
+        [[ $min_headroom -lt 50 ]] && min_headroom=50
+        if [[ "${current_usage}" -ge "${thresh}" ]] || [[ "${avail_mb}" -le "${min_headroom}" ]]; then
+            if command -v logger >/dev/null 2>&1; then logger -t net-tap "CRITICAL: Storage threshold reached (${current_usage}% >= ${thresh}% or ${avail_mb}MB <= ${min_headroom}MB). Triggering emergency shutdown for ${ifc}."; fi
             local netns_cmd=()
             if [[ -n "${ns}" ]]; then netns_cmd=(-n "${ns}"); fi
             "${script}" off -i "${ifc}" "${netns_cmd[@]}" >/dev/null 2>&1 || true
@@ -598,9 +605,9 @@ start_tap() {
         fi
 
         if [[ -n "${NETNS}" ]]; then
-            ( _close_lock_fds; exec ip netns exec "${NETNS}" "${TCPDUMP_CMD[@]}" ) > "${TCPDUMP_ERR}" 2>&1 &
+            ( _close_lock_fds; exec setsid ip netns exec "${NETNS}" "${TCPDUMP_CMD[@]}" ) > "${TCPDUMP_ERR}" 2>&1 &
         else
-            ( _close_lock_fds; exec "${TCPDUMP_CMD[@]}" ) > "${TCPDUMP_ERR}" 2>&1 &
+            ( _close_lock_fds; exec setsid "${TCPDUMP_CMD[@]}" ) > "${TCPDUMP_ERR}" 2>&1 &
         fi
         local PID_TCPDUMP=$!
         PIDS_TCPDUMP+=("${PID_TCPDUMP}")
@@ -642,7 +649,7 @@ start_tap() {
 
     local THRESH="${DISK_THRESH:-85}"
     log_info "Starting background disk watchdog (threshold: ${THRESH}%)..."
-    ( for fd in {3..20}; do eval "exec ${fd}>&-" 2>/dev/null; done; _disk_watchdog_worker "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" ) >/dev/null 2>&1 &
+    ( for fd in {3..20}; do eval "exec ${fd}>&-" 2>/dev/null; done; _disk_watchdog_worker "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" "${TIMESTAMP}" ) >/dev/null 2>&1 &
     PID_WATCHDOG=$!
 
     # 8. Secure atomic state serialization
@@ -792,7 +799,11 @@ stop_tap() {
     for pid in "${PIDS_TCPDUMP[@]:-}"; do
         [[ -z "${pid}" ]] && continue
         if kill -0 "${pid}" 2>/dev/null; then
-            kill -SIGTERM "${pid}" 2>/dev/null || true
+            local p_comm
+            p_comm=$(cat "/proc/${pid}/comm" 2>/dev/null || echo "")
+            if [[ "${p_comm}" == "tcpdump" ]]; then
+                kill -SIGTERM "${pid}" 2>/dev/null || true
+            fi
         fi
     done
     for pid in "${PIDS_TCPDUMP[@]:-}"; do
@@ -1017,16 +1028,10 @@ list_sessions() {
 
         local is_alive=0
         if [[ -n "${s_pid}" && "${s_pid}" =~ ^[0-9]+$ ]]; then
-            if [[ -n "${s_netns}" ]]; then
-                if ip netns exec "${s_netns}" kill -0 "${s_pid}" 2>/dev/null; then
-                    is_alive=1
-                elif kill -0 "${s_pid}" 2>/dev/null; then
-                    is_alive=1
-                fi
-            else
-                if kill -0 "${s_pid}" 2>/dev/null; then
-                    is_alive=1
-                fi
+            if [[ -d "/proc/${s_pid}" ]] || kill -0 "${s_pid}" 2>/dev/null; then
+                is_alive=1
+            elif [[ -n "${s_netns}" ]] && ip netns exec "${s_netns}" kill -0 "${s_pid}" 2>/dev/null; then
+                is_alive=1
             fi
         fi
 
@@ -1081,10 +1086,12 @@ clean_sessions() {
         for sfile in "${STATE_DIR}"/*.state; do
             [[ -f "${sfile}" ]] || continue
 
-            local s_iface="" s_netns="" s_pids_str=""
+            local s_iface="" s_netns="" s_pids_str="" s_validity=""
             local parsed_clean
             parsed_clean=$(
                 (
+                    local bname="${sfile##*/}"
+                    bname="${bname%.state}"
                     if load_state_file "${sfile}" >/dev/null 2>&1; then
                         local all_pids=()
                         [[ ${#PIDS_TCPDUMP[@]} -gt 0 ]] && all_pids+=("${PIDS_TCPDUMP[@]}")
@@ -1092,12 +1099,19 @@ clean_sessions() {
                         [[ ${#PIDS_IPMON[@]} -gt 0 ]] && all_pids+=("${PIDS_IPMON[@]}")
                         [[ -n "${PID_WATCHDOG:-}" ]] && all_pids+=("${PID_WATCHDOG}")
                         [[ -n "${PID_AUTOSHUTDOWN:-}" ]] && all_pids+=("${PID_AUTOSHUTDOWN}")
-                        printf "%s\037%s\037%s\n" "${IFACE:-}" "${NETNS:-}" "${all_pids[*]}"
+                        printf "%s\037%s\037%s\037valid\n" "${IFACE:-}" "${NETNS:-}" "${all_pids[*]}"
+                    else
+                        local rec_ns="" rec_if="${bname}"
+                        if [[ "${bname}" == *"__"* ]]; then
+                            rec_ns="${bname%%__*}"
+                            rec_if="${bname#*__}"
+                        fi
+                        printf "%s\037%s\037%s\037corrupt\n" "${rec_if}" "${rec_ns}" ""
                     fi
                 )
             )
             [[ -z "${parsed_clean}" ]] && continue
-            IFS=$'\037' read -r s_iface s_netns s_pids_str <<< "${parsed_clean}"
+            IFS=$'\037' read -r s_iface s_netns s_pids_str s_validity <<< "${parsed_clean}"
 
             if [[ -n "${IFACE:-}" && "${IFACE}" != "${s_iface}" ]]; then
                 continue
@@ -1116,7 +1130,7 @@ clean_sessions() {
             done
 
             # Load state file if possible to restore original sysctl, MTU, and offload configurations
-            if load_state_file "${sfile}" 2>/dev/null; then
+            if [[ "${s_validity}" == "valid" ]] && load_state_file "${sfile}" 2>/dev/null; then
                 NETNS="${s_netns}"
                 IFS=',' read -ra if_arr <<< "${s_iface}"
                 for dev in "${if_arr[@]}"; do
@@ -1168,7 +1182,7 @@ clean_sessions() {
                     [[ "$(basename "${lk}")" == ".lock_master" ]] && continue
                     if (
                         exec 9>"${lk}"
-                        flock -x -n 9 && rm -f "${lk}"
+                        flock -x -n 9
                     ) 2>/dev/null; then
                         cleaned_locks=$((cleaned_locks + 1))
                     fi

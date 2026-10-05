@@ -52,9 +52,11 @@ test: lint fixtures
 	@echo "Running automated compliance and unit tests..."
 	@bash tests/run_tests.sh
 
+SUDO ?= $(shell if [ "$$(id -u)" -ne 0 ]; then echo sudo; fi)
+
 test-integration: lint fixtures
 	@echo "Running integration tests (requires root)..."
-	@sudo PYTHONDONTWRITEBYTECODE=1 bash tests/run_tests.sh
+	@$(SUDO) PYTHONDONTWRITEBYTECODE=1 bash tests/run_tests.sh
 
 clean:
 	@rm -rf tests/__pycache__ /tmp/pmtud.pcap

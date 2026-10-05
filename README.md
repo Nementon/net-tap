@@ -242,11 +242,12 @@ sudo capsh --user=$USER --inh=cap_net_admin,cap_net_raw,cap_sys_admin --addamb=c
 * `iproute2` (`ip`, `tc`, `ss`)
 * `tcpdump`
 * `ethtool`
-* `iptables` / `ip6tables` (Netfilter raw table NOTRACK and drop rules)
-* POSIX & Linux system utilities: `sysctl`, `dmesg`, `flock`, `gzip`, `mktemp`, `readlink`, `du`, `df`, `awk`, `sed`, `grep`
+* `python3` (Core execution & active probing engine)
+* `iptables` / `ip6tables` (Netfilter raw table NOTRACK and drop rules when available)
+* POSIX & Linux system utilities: `sysctl`, `dmesg`, `flock`, `gzip`, `mktemp`, `readlink`, `du`, `df`, `awk`, `sed`, `grep`, `find`, `stat`, `date`
 
 ### Optional Dependencies (Recommended)
-* `tshark` (Wireshark CLI): Unlocks L4-L7 Deep Protocol Inspection (DNS, TLS SNI, SNMP, DHCP hostnames, OSPF, BGP).
+* `tshark` (Wireshark CLI): Unlocks L4-L7 Deep Protocol Inspection (DNS, TLS SNI, SNMP, DHCP hostnames, OSPF, BGP). If installed, DPI can be bypassed via `NET_TAP_DISABLE_TSHARK=1` to force native `tcpdump` extraction.
 * `mergecap` (Wireshark suite): Enables automatic chronological merging of Dual-Port optical tap captures (`sfp0,sfp1`).
 * `jq`: Recommended for automated validation of `--json` analysis outputs in scripts or CI pipelines.
 * `python3-scapy`: Strictly required for active probing (`net-tap probe`) and generating synthetic test fixtures.
@@ -352,7 +353,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | - | `--dhcp-discover6`, `--dhcp6-discover`| Transmit RFC 8415 DHCPv6 Solicit (IPv6 UDP 546->547) to audit DHCPv6 servers. | None |
 | - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 576-9000B, IPv6: 1280-9000B). | `192.168.1.1` |
 | - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | `192.168.1.1` |
-| - | `--eapol-check` | Audit 802.1X Network Access Control via single EAPOL-Start frame. | None |
+| - | `--eapol-check`, `--eapol-probe` | Audit 802.1X Network Access Control via single EAPOL-Start frame. | None |
 | - | `--snmp-probe` | Probe SNMPv2c sysDescr.0 via single UDP 161 frame. | `192.168.1.1` |
 | - | `--dns-probe` | Probe DNS server version via CHAOS TXT `version.bind` query on UDP 53. | `192.168.1.1` |
 | - | `--nbns-probe` | Probe NetBIOS Name Service Node Status on UDP 137. | `255.255.255.255` |
@@ -362,16 +363,19 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | - | `--src-mac` | Custom source MAC address for active probes. | Physical MAC |
 | - | `--community` | SNMP community string for `--snmp-probe`. | `public` |
 | - | `--vlan` | Inject probes tagged with IEEE 802.1Q VLAN ID(s) (single `100`, list `10,20`, or range `10-20`). | Untagged |
-| - | `--qinq` | Inject probes double-tagged with 802.1ad QinQ as `s_tag,c_tag` (1-4094, e.g., `100,200`). | None |
+| - | `--qinq` | Inject probes double-tagged with QinQ as `s_tag,c_tag` (1-4094, e.g., `100,200`). | None |
+| - | `--pcp` | IEEE 802.1p Priority Code Point (`0-7`) for 802.1Q / QinQ tagged frames. | `0` |
+| - | `--dei` | Drop Eligible Indicator bit (`0` or `1`) for 802.1Q / QinQ tagged frames. | `0` |
+| - | `--qinq-tpid` | Outer VLAN TPID / EtherType (`0x88a8`, `0x9100`, `0x9200`). | `0x88a8` |
 | - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
-| - | `--rate` | Maximum probe transmission rate in packets per second. | `50` |
+| - | `--rate` | Maximum probe transmission rate in packets per second (capped at 5000 pps; broadcast capped at 1000 pps). | `50` |
 | - | `--timeout` | Maximum probe duration timeout in seconds. | `5` |
 | - | `--audit-id` | Custom audit identifier for probe session correlation in JSONL log. | Auto |
 
 #### Options for `net-tap analyze`
 | Flag | Long Option | Description | Default |
 | :--- | :--- | :--- | :--- |
-| `-d` | `--dir` | Directory containing PCAP traces (`*.pcap`, `*.pcap.gz`) and metadata logs. | `./captures` |
+| `-d`, `-o` | `--dir`, `--output-dir` | Directory containing PCAP traces (`*.pcap`, `*.pcap.gz`) and metadata logs. | `./captures` |
 | `-j` | `--json` | Output analysis results as an RFC 8259 structured JSON document. | Disabled (Human-readable) |
 
 #### Options for `net-tap list`
@@ -396,6 +400,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | `COMPRESS_PCAPS` | When set to `1`, forces gzip compression on rotated PCAP chunks (`-z`). | `0` |
 | `JSON_OUT` | When set to `1`, forces `analyze` to emit JSON output (`--json`). | `0` |
 | `BPF_FILTER` | Default BPF filter applied to captures if `-f` is omitted. | None |
+| `NET_TAP_DISABLE_TSHARK` | When set to `1`, forces offline analyzer to use native `tcpdump` engine instead of `tshark`. | `0` |
 
 ---
 
@@ -707,7 +712,7 @@ The `--icmp-pmtu <target>` probe diagnoses MTU black holes, baby jumbo frame han
 
 **Implementation Details:**
 - **Dual-Stack Stepped Envelope Probing**: Transmits ICMP Echo Requests (with IPv4 **Don't Fragment (DF)** bit set, or standard IPv6 Echo Requests) across standard network MTU thresholds:
-  - **IPv4 Stepped Envelope**: `1500` (Standard Ethernet), `2000` (Routed MTU), `4000` (Intermediate Jumbo), and `9000` (Standard Jumbo Frame MTU).
+  - **IPv4 Stepped Envelope**: `576` (RFC 791 Minimum Reassembly Buffer), `1280` (IPv6 Min MTU), `1420` (WireGuard / VPN MTU), `1450` (OpenStack VXLAN), `1492` (PPPoE MTU), `1500` (Standard Ethernet), `2000` (Routed MTU), `4000` (Intermediate Jumbo), and `9000` (Standard Jumbo Frame MTU).
   - **IPv6 Stepped Envelope**: `1280` (RFC 8200 IPv6 Minimum Link MTU), `1420` (IPv6-in-IPv4 / WireGuard / Overlay Tunnel MTU), `1500` (Standard Ethernet), `2000`, `4000`, and `9000` (Jumbo Frame MTU).
 - **Local MTU Exceeded Handling (`EMSGSIZE`)**: When attempting to inject a 9000-byte frame onto an interface configured with MTU 1500, the Linux kernel raw socket returns `OSError: [Errno 90] Message too long` (`EMSGSIZE`). [`lib/probe.py`](lib/probe.py) catches `EMSGSIZE` gracefully, logging status `local_mtu_exceeded` in the audit trail without terminating execution.
 - **Next-Hop MTU Determination**: If an upstream router cannot forward a packet due to an MTU constraint and the DF bit is set, it drops the packet and returns an **ICMP Type 3 Code 4** (*Destination Unreachable: Fragmentation Needed and DF set*), indicating the exact Next-Hop MTU. If no reply is received, an MTU black hole is detected.
@@ -1008,7 +1013,7 @@ Top Active Host Talkers & Conversations:
   Top Flows      : 10.0.10.50:54321 <-> 10.0.10.1:443 (80 pkts)
 
 ======================================================================
- [4] INFRASTRUCTURE PROTOCOLS (LLDP, CDP, STP, FHRP)
+ [4] INFRASTRUCTURE PROTOCOLS (LLDP, CDP, STP, FHRP, LACP)
 ======================================================================
   [FOUND] LLDP (Link Layer Discovery Protocol): 4 frames observed.
     LLDP, name core-sw-01.corp, length 128
@@ -1016,6 +1021,7 @@ Top Active Host Talkers & Conversations:
   [FOUND] Spanning Tree Protocol (STP): 28 BPDUs observed.
   [FOUND] VRRP (Virtual Router Redundancy): 2 frames observed.
   [FOUND] Cisco HSRP: 1 frames observed.
+  [FOUND] LACP (Link Aggregation Control): 1 frames observed.
 
 ======================================================================
  [5] LAYER 2 SECURITY & ADMISSION CONTROL PROFILE
@@ -1158,6 +1164,7 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     "lldp": 4,
     "cdp": 2,
     "stp": 28,
+    "lacp": 1,
     "vrrp": 2,
     "hsrp": 1,
     "isis": 1,

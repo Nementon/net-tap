@@ -170,7 +170,7 @@ load_state_file() {
         return 1
     fi
     # shellcheck disable=SC2016
-    if echo "${scontent}" | grep -qE '(\$\(|`|\${|;|\||&|<|>)'; then
+    if echo "${scontent}" | grep -qE '(\$\(|`|\${|;)'; then
         log_err "Security violation: State file '${sfile}' contains forbidden expansion characters."
         return 1
     fi

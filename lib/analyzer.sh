@@ -146,17 +146,17 @@ analyze_session() {
     local ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah
     local tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans
     local tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order
-    local lldp_count cdp_count stp_count vrrp_count hsrp_count eapol_count dhcp_count
+    local lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag
     read -r qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count \
             ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah \
             tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans \
             tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order \
-            lldp_count cdp_count stp_count vrrp_count hsrp_count eapol_count dhcp_count < <(
+            lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag < <(
         awk '
             /^[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
                 in_qinq=0; in_arp=0; in_ndp=0; in_vxlan=0; in_gtp_u=0; in_gtp_c=0; in_geneve=0; in_gre=0; in_6in4=0; in_4in6=0; in_srv6=0; in_sctp=0; in_mpls=0; in_isis=0; in_bfd=0; in_pmtud=0
-                in_lldp=0; in_cdp=0; in_stp=0; in_vrrp=0; in_hsrp=0; in_eapol=0; in_dhcp=0
-                in_hbh=0; in_rtg=0; in_frag=0; in_esp=0; in_ah=0
+                in_lldp=0; in_cdp=0; in_stp=0; in_lacp=0; in_vrrp=0; in_hsrp=0; in_eapol=0; in_dhcp=0
+                in_hbh=0; in_rtg=0; in_frag=0; in_esp=0; in_ah=0; in_v4frag=0
             }
             /ethertype 802.1Q.*ethertype 802.1Q|0x88a8|0x9100|0x9200|QinQ/ { if (!in_qinq) { qinq++; in_qinq=1 } }
             /ethertype ARP|Request who-has|Reply .* is-at|ARP,/ { if (!in_arp) { arp++; in_arp=1 } }
@@ -181,6 +181,7 @@ analyze_session() {
             /next-header (Options|HBH) \(0\)|: HBH/ { if (!in_hbh) { ipv6_hbh++; in_hbh=1 } }
             /next-header (Routing) \(43\)|: srcrt/ { if (!in_rtg) { ipv6_routing++; in_rtg=1 } }
             /next-header (Frag|Fragment) \(44\)|: frag \(|fragment header/ { if (!in_frag) { ipv6_frag++; in_frag=1 } }
+            /flags \[\+\]|offset [1-9]/ { if (!in_v4frag) { v4frag++; in_v4frag=1 } }
             /next-header (ESP) \(50\)|: ESP\(/ { if (!in_esp) { ipv6_esp++; in_esp=1 } }
             /next-header (AH) \(51\)|: AH\(/ { if (!in_ah) { ipv6_ah++; in_ah=1 } }
             /Flags \[S\]/ { tcp_syn++ }
@@ -198,6 +199,7 @@ analyze_session() {
             /LLDP|0x88cc/ { if (!in_lldp) { lldp++; in_lldp=1 } }
             /CDPv/ { if (!in_cdp) { cdp++; in_cdp=1 } }
             /STP 802.1|802.3.*STP|ethertype.*0x0027/ { if (!in_stp) { stp++; in_stp=1 } }
+            /Slow Protocols|0x8809|LACP/ { if (!in_lacp) { lacp++; in_lacp=1 } }
             /VRRPv/ { if (!in_vrrp) { vrrp++; in_vrrp=1 } }
             /HSRPv/ { if (!in_hsrp) { hsrp++; in_hsrp=1 } }
             /EAPOL/ { if (!in_eapol) { eapol++; in_eapol=1 } }
@@ -207,7 +209,7 @@ analyze_session() {
                       ipv6_hbh+0, ipv6_routing+0, ipv6_frag+0, ipv6_esp+0, ipv6_ah+0, \
                       tcp_syn+0, tcp_synack+0, tcp_rst+0, tcp_fin+0, tcp_psh+0, tcp_urg+0, tcp_zero_win+0, tcp_retrans+0, \
                       tcp_mss+0, tcp_wscale+0, tcp_sack_perm+0, tcp_out_of_order+0, \
-                      lldp+0, cdp+0, stp+0, vrrp+0, hsrp+0, eapol+0, dhcp+0
+                      lldp+0, cdp+0, stp+0, lacp+0, vrrp+0, hsrp+0, eapol+0, dhcp+0, v4frag+0
             }
         ' "${dump_file}"
     )
@@ -444,8 +446,11 @@ analyze_session() {
         echo "  [ -- ] IPv6 RAs: Not observed."
     fi
 
-    # IPv6 Extension Headers
-    echo -e "\n${C_CYAN}IPv6 Extension Headers Observed:${C_RESET}"
+    # IPv6 Extension Headers & IP Fragmentation
+    echo -e "\n${C_CYAN}IPv6 Extension Headers & IP Fragmentation:${C_RESET}"
+    if [[ "${ipv4_frag}" -gt 0 ]]; then
+        echo -e "  IPv4 Fragmentation  : ${ipv4_frag} fragmented packet(s) observed."
+    fi
     local v6_ext_total=$((ipv6_hbh + ipv6_routing + ipv6_frag + ipv6_esp + ipv6_ah))
     if [[ ${v6_ext_total} -gt 0 ]]; then
         echo -e "  Hop-by-Hop (0) : ${ipv6_hbh} | Routing (43) : ${ipv6_routing} | Fragment (44) : ${ipv6_frag}"
@@ -659,6 +664,11 @@ except Exception:
         echo -e "  ${C_GREEN}[FOUND] Spanning Tree Protocol (STP):${C_RESET} ${stp_count} BPDUs observed."
     else
         echo "  [ -- ] STP BPDUs: Not observed (PortFast/BPDU filter may be active)."
+    fi
+
+    # LACP (IEEE 802.3ad / 802.1AX Slow Protocols EtherType 0x8809)
+    if [[ "${lacp_count}" -gt 0 ]]; then
+        echo -e "  ${C_GREEN}[FOUND] LACP (Link Aggregation Control Protocol):${C_RESET} ${lacp_count} frames observed."
     fi
 
     # FHRP (HSRP / VRRP)
@@ -898,36 +908,65 @@ for p in audit_paths:
                     target = record.get("target")
                     if target:
                         probed_ips.add(str(target))
-                    v = record.get("vlan")
-                    if v is not None:
-                        try:
-                            v_int = int(v)
-                            if 1 <= v_int <= 4094:
-                                vlans_probed_set.add(str(v_int))
-                        except (ValueError, TypeError):
-                            pass
+                    q = record.get("qinq")
+                    if q:
+                        vlans_probed_set.add(str(q))
                     else:
-                        vlans_probed_set.add("untagged")
+                        v = record.get("vlan")
+                        if v is not None:
+                            try:
+                                v_int = int(v)
+                                if 1 <= v_int <= 4094:
+                                    vlans_probed_set.add(str(v_int))
+                            except (ValueError, TypeError):
+                                pass
+                        else:
+                            vlans_probed_set.add("untagged")
                 except Exception:
                     pass
     except Exception:
         pass
 
-vlans_probed = sorted(list(vlans_probed_set), key=lambda x: (x != "untagged", int(x) if x.isdigit() else x))
+def vlan_sort_key(x):
+    if x == "untagged":
+        return (0, 0, "")
+    m = re.match(r"^(\d+)", x)
+    if m:
+        return (1, int(m.group(1)), x)
+    return (2, 0, x)
+
+vlans_probed = sorted(list(vlans_probed_set), key=vlan_sort_key)
 responses_received = 0
 discovered_hosts_dict = {}
 
 current_vlan = "untagged"
+current_src_mac = None
+
 if os.path.exists(dump_path):
     with open(dump_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            vlan_match = re.search(r"\bvlan\s+(\d+)\b", line)
-            if vlan_match:
-                current_vlan = vlan_match.group(1)
-            elif not line.startswith(" ") and not line.startswith("\t"):
-                current_vlan = "untagged"
+            # Check for start of new packet (unindented line)
+            if not line.startswith(" ") and not line.startswith("\t"):
+                # Extract Ethernet MAC addresses from packet header
+                mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>\s+([0-9a-fA-F:]{17})", line)
+                if mac_m:
+                    current_src_mac = mac_m.group(1).lower()
+                else:
+                    current_src_mac = None
+
+                # Extract VLAN / QinQ tags
+                vlan_tags = re.findall(r"\bvlan\s+(\d+)\b", line)
+                if vlan_tags:
+                    if len(vlan_tags) >= 2:
+                        current_vlan = f"{vlan_tags[0]},{vlan_tags[1]}"
+                    else:
+                        current_vlan = vlan_tags[0]
+                else:
+                    current_vlan = "untagged"
+
             pkt_vlan = current_vlan
 
+            # Check ARP replies
             arp_match = re.search(r"Reply\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+is-at\s+([0-9a-fA-F:]{17})", line)
             if arp_match:
                 ip = arp_match.group(1)
@@ -939,89 +978,157 @@ if os.path.exists(dump_path):
                         discovered_hosts_dict[key] = mac
                 continue
 
-            if "ICMP echo reply" in line or "need to frag" in line or "packet too big" in line or "echo reply" in line:
+            # Check ICMP & ICMPv6 Echo / PMTUD replies
+            if "ICMP echo reply" in line or "ICMP6, echo reply" in line or "need to frag" in line or "packet too big" in line or "echo reply" in line:
                 responses_received += 1
+                v4_icmp_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+>\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):\s+ICMP", line)
+                if v4_icmp_m:
+                    resp_ip = v4_icmp_m.group(1)
+                    if not probed_ips or resp_ip in probed_ips:
+                        key = (resp_ip, pkt_vlan)
+                        if key not in discovered_hosts_dict and current_src_mac:
+                            discovered_hosts_dict[key] = current_src_mac
+                else:
+                    v6_icmp_m = re.search(r"([0-9a-fA-F:]+)\s+>\s+([0-9a-fA-F:]+):\s+ICMP6", line)
+                    if v6_icmp_m:
+                        resp_ip = v6_icmp_m.group(1).lower()
+                        if not probed_ips or resp_ip in probed_ips:
+                            key = (resp_ip, pkt_vlan)
+                            if key not in discovered_hosts_dict and current_src_mac:
+                                discovered_hosts_dict[key] = current_src_mac
                 continue
 
+            # Check BOOTP / DHCP
             if "BOOTP/DHCP, Reply" in line or ("dhcp" in probed_types and "BOOTP/DHCP" in line and ">" in line):
                 dhcp_ip_m = re.search(r"Your-IP\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", line)
                 dhcp_mac_m = re.search(r"Client-Ethernet-Address\s+([0-9a-fA-F:]{17})", line)
                 if dhcp_ip_m and dhcp_mac_m:
                     ip = dhcp_ip_m.group(1)
-                    mac = dhcp_mac_m.group(2).lower()
+                    mac = dhcp_mac_m.group(1).lower()
                     key = (ip, pkt_vlan)
                     discovered_hosts_dict[key] = mac
                 responses_received += 1
                 continue
 
+            # Check DHCPv6
             if "DHCPv6" in line and ("reply" in line.lower() or "advertise" in line.lower()):
                 responses_received += 1
+                v6_dhcp_m = re.search(r"([0-9a-fA-F:]+)\.547\s+>\s+([0-9a-fA-F:]+)\.546", line)
+                if v6_dhcp_m:
+                    resp_ip = v6_dhcp_m.group(1).lower()
+                    key = (resp_ip, pkt_vlan)
+                    if key not in discovered_hosts_dict and current_src_mac:
+                        discovered_hosts_dict[key] = current_src_mac
                 continue
 
+            # Check TCP SYN-ACK and RST responses (IPv4 and IPv6)
             if "Flags [S.]" in line or "Flags [R" in line:
-                for ip in probed_ips:
-                    if ip and f"{ip}." in line:
+                tcp_v4_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)\s+>\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+):\s+Flags", line)
+                if tcp_v4_m:
+                    resp_ip = tcp_v4_m.group(1)
+                    if not probed_ips or resp_ip in probed_ips:
                         responses_received += 1
-                        break
-                continue
+                        key = (resp_ip, pkt_vlan)
+                        if key not in discovered_hosts_dict and current_src_mac:
+                            discovered_hosts_dict[key] = current_src_mac
+                        continue
+                tcp_v6_m = re.search(r"([0-9a-fA-F:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F:]+)\.([0-9]+):\s+Flags", line)
+                if tcp_v6_m:
+                    resp_ip = tcp_v6_m.group(1).lower()
+                    if not probed_ips or resp_ip in probed_ips:
+                        responses_received += 1
+                        key = (resp_ip, pkt_vlan)
+                        if key not in discovered_hosts_dict and current_src_mac:
+                            discovered_hosts_dict[key] = current_src_mac
+                        continue
 
+            # Check IPv6 NDP Neighbor Advertisement
             if "neighbor advertisement" in line:
                 responses_received += 1
                 tgt_m = re.search(r"tgt\s+is\s+([0-9a-fA-F:]+)", line)
-                mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line)
-                if not mac_m:
-                    mac_m = re.search(r">\s+([0-9a-fA-F:]{17})", line)
-                if tgt_m and mac_m:
+                mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line) or re.search(r">\s+([0-9a-fA-F:]{17})", line)
+                tgt_mac = (mac_m.group(1).lower() if mac_m else current_src_mac)
+                if tgt_m and tgt_mac:
                     tgt_ip = tgt_m.group(1).lower()
-                    tgt_mac = mac_m.group(1).lower()
                     if not probed_ips or tgt_ip in probed_ips:
                         key = (tgt_ip, pkt_vlan)
                         if key not in discovered_hosts_dict:
                             discovered_hosts_dict[key] = tgt_mac
                 continue
 
+            # Check EAPOL
             if "eapol_start" in probed_types or "eapol" in probed_types:
                 if "EAP" in line or "eapol" in line.lower() or "0x888e" in line:
                     responses_received += 1
                     continue
 
+            # Check SNMP responses (UDP port 161)
             if "snmp" in probed_types:
                 if ".161 >" in line or "snmp" in line.lower() or "GetResponse" in line:
                     responses_received += 1
                     snmp_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.161\s+>", line)
                     if snmp_m:
                         s_ip = snmp_m.group(1)
+                        resp_mac = current_src_mac
                         mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line) or re.search(r">\s+([0-9a-fA-F:]{17})", line)
-                        if mac_m and (not probed_ips or s_ip in probed_ips):
+                        if mac_m:
+                            resp_mac = mac_m.group(1).lower()
+                        if resp_mac and (not probed_ips or s_ip in probed_ips):
                             key = (s_ip, pkt_vlan)
                             if key not in discovered_hosts_dict:
-                                discovered_hosts_dict[key] = mac_m.group(1).lower()
+                                discovered_hosts_dict[key] = resp_mac
+                    else:
+                        snmp_v6_m = re.search(r"([0-9a-fA-F:]+)\.161\s+>", line)
+                        if snmp_v6_m:
+                            s_ip = snmp_v6_m.group(1).lower()
+                            resp_mac = current_src_mac
+                            if resp_mac and (not probed_ips or s_ip in probed_ips):
+                                key = (s_ip, pkt_vlan)
+                                if key not in discovered_hosts_dict:
+                                    discovered_hosts_dict[key] = resp_mac
                     continue
 
+            # Check DNS responses (UDP port 53)
             if "dns" in probed_types:
                 if ".53 >" in line or "domain >" in line or "version.bind" in line:
                     responses_received += 1
                     dns_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.53\s+>", line)
                     if dns_m:
                         d_ip = dns_m.group(1)
+                        resp_mac = current_src_mac
                         mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line) or re.search(r">\s+([0-9a-fA-F:]{17})", line)
-                        if mac_m and (not probed_ips or d_ip in probed_ips):
+                        if mac_m:
+                            resp_mac = mac_m.group(1).lower()
+                        if resp_mac and (not probed_ips or d_ip in probed_ips):
                             key = (d_ip, pkt_vlan)
                             if key not in discovered_hosts_dict:
-                                discovered_hosts_dict[key] = mac_m.group(1).lower()
+                                discovered_hosts_dict[key] = resp_mac
+                    else:
+                        dns_v6_m = re.search(r"([0-9a-fA-F:]+)\.53\s+>", line)
+                        if dns_v6_m:
+                            d_ip = dns_v6_m.group(1).lower()
+                            resp_mac = current_src_mac
+                            if resp_mac and (not probed_ips or d_ip in probed_ips):
+                                key = (d_ip, pkt_vlan)
+                                if key not in discovered_hosts_dict:
+                                    discovered_hosts_dict[key] = resp_mac
                     continue
 
+            # Check NBNS responses (UDP port 137)
             if "nbns" in probed_types:
                 if ".137 >" in line or "netbios-ns >" in line or "NBSTAT" in line:
                     responses_received += 1
                     nb_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.137\s+>", line)
                     if nb_m:
                         n_ip = nb_m.group(1)
+                        resp_mac = current_src_mac
                         mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line) or re.search(r">\s+([0-9a-fA-F:]{17})", line)
-                        if mac_m and (not probed_ips or n_ip in probed_ips):
+                        if mac_m:
+                            resp_mac = mac_m.group(1).lower()
+                        if resp_mac and (not probed_ips or n_ip in probed_ips):
                             key = (n_ip, pkt_vlan)
                             if key not in discovered_hosts_dict:
-                                discovered_hosts_dict[key] = mac_m.group(1).lower()
+                                discovered_hosts_dict[key] = resp_mac
                     continue
 
 discovered_hosts = [
@@ -1039,7 +1146,7 @@ result = {
 
 with open(out_json, "w", encoding="utf-8") as out_f:
     json.dump(result, out_f, indent=2)
-' "${dump_file}" "${TEMP_DIR}/active_audit.json" "${audit_files[@]}" 2>/dev/null || true
+' "${dump_file}" "${TEMP_DIR}/active_audit.json" "${audit_files[@]}" || true
 
         echo -e "\n${C_BOLD}======================================================================${C_RESET}"
         echo -e "${C_MAGENTA}${C_BOLD} [7] ACTIVE AUDIT & TARGET PROBING CORRELATION${C_RESET}"
@@ -1174,6 +1281,7 @@ except Exception:
     "lldp": ${lldp_count:-0},
     "cdp": ${cdp_count:-0},
     "stp": ${stp_count:-0},
+    "lacp": ${lacp_count:-0},
     "vrrp": ${vrrp_count:-0},
     "hsrp": ${hsrp_count:-0},
     "isis": ${isis_count:-0},

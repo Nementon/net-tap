@@ -32,9 +32,17 @@ try:
     from scapy.all import (
         Ether, Dot1Q, ARP, IP, IPv6, ICMP, UDP, BOOTP, DHCP, TCP,
         ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, ICMPv6ND_NA, Raw,
-        DNS, DNSQR
+        DNS, DNSQR, bind_layers
     )
     import scapy.layers.snmp as snmp
+    bind_layers(Ether, Dot1Q, type=0x9100)
+    bind_layers(Ether, Dot1Q, type=0x9200)
+    bind_layers(Ether, Dot1Q, type=0x88a8)
+    bind_layers(Ether, Dot1Q, type=0x8100)
+    bind_layers(Dot1Q, Dot1Q, type=0x9100)
+    bind_layers(Dot1Q, Dot1Q, type=0x9200)
+    bind_layers(Dot1Q, Dot1Q, type=0x88a8)
+    bind_layers(Dot1Q, Dot1Q, type=0x8100)
 except ImportError as err:
     sys.stderr.write(f"ERROR: Scapy is required for net-tap probe ({err}).\n")
     sys.exit(1)
@@ -42,6 +50,8 @@ except ImportError as err:
 SO_MARK = 36  # Linux SO_MARK socket option
 PROBE_FWMARK = 0x7a9  # 1961 - Net-Tap fwmark & wire watermark identifier
 SIOCGIFHWADDR = 0x8927  # Linux ioctl to get hardware MAC address
+
+MAC_RESOLUTION_CACHE = {}
 
 
 def get_iface_mac(iface: str, explicit_mac: str = None) -> str:
@@ -152,8 +162,13 @@ def resolve_source_ipv6(iface: str, target_ip: str = "", explicit_src: str = Non
 
 def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     src_mac: str = None, src_ip: str = None,
-                    vlan: int = None, qinq: tuple = None) -> str:
+                    vlan: int = None, qinq: tuple = None,
+                    pcp: int = 0, dei: int = 0, qinq_tpid: int = 0x88a8) -> str:
     """Resolve destination MAC for target IP using neighbor cache with active pre-flight ARP/NDP fallback."""
+    cache_key = (iface, target_ip, is_v6, vlan, qinq, pcp, dei, qinq_tpid)
+    if cache_key in MAC_RESOLUTION_CACHE:
+        return MAC_RESOLUTION_CACHE[cache_key]
+
     try:
         try:
             tgt_obj = ipaddress.ip_address(target_ip)
@@ -172,7 +187,9 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                 if "lladdr" in parts:
                     idx = parts.index("lladdr")
                     if idx + 1 < len(parts):
-                        return parts[idx + 1]
+                        resolved = parts[idx + 1]
+                        MAC_RESOLUTION_CACHE[cache_key] = resolved
+                        return resolved
 
             # Pre-flight ICMPv6 Neighbor Solicitation if src_mac provided
             if src_mac and src_ip:
@@ -181,8 +198,8 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     sn_mcast_ip = f"ff02::1:ff{last_24[:2]}:{last_24[2:]}"
                     sn_mcast_mac = f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
                     ns = IPv6(src=src_ip, dst=sn_mcast_ip, fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_NS(tgt=str(tgt_obj)) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
-                    ns_frame = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vlan, qinq=qinq)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x86dd)) as r_sock:
+                    ns_frame = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -193,10 +210,10 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                                 data = r_sock.recv(2048)
                                 if len(data) >= 14:
                                     r_pkt = Ether(data)
-                                    if r_pkt.haslayer(Dot1Q):
-                                        r_pkt = r_pkt[Dot1Q].payload
                                     if r_pkt.haslayer(ICMPv6ND_NA) and getattr(r_pkt[ICMPv6ND_NA], "tgt", None) == str(tgt_obj):
-                                        return r_pkt[Ether].src if r_pkt.haslayer(Ether) else Ether(data).src
+                                        resolved = r_pkt[Ether].src
+                                        MAC_RESOLUTION_CACHE[cache_key] = resolved
+                                        return resolved
                             except (socket.timeout, BlockingIOError):
                                 break
                 except Exception:
@@ -220,7 +237,9 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                         parts = line.split()
                         if len(parts) >= 6 and parts[0] == str(tgt_obj) and parts[5] == iface:
                             if parts[3] != "00:00:00:00:00:00":
-                                return parts[3]
+                                resolved = parts[3]
+                                MAC_RESOLUTION_CACHE[cache_key] = resolved
+                                return resolved
 
             res = subprocess.run(["ip", "-4", "neigh", "show", "dev", iface, str(tgt_obj)],
                                  capture_output=True, text=True, check=False)
@@ -229,15 +248,17 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                 if "lladdr" in parts:
                     idx = parts.index("lladdr")
                     if idx + 1 < len(parts):
-                        return parts[idx + 1]
+                        resolved = parts[idx + 1]
+                        MAC_RESOLUTION_CACHE[cache_key] = resolved
+                        return resolved
 
             # Pre-flight ARP resolution if src_mac provided
             if src_mac:
                 try:
                     s_ip = src_ip or "0.0.0.0"
                     arp_req = ARP(op=1, hwsrc=src_mac, psrc=s_ip, pdst=str(tgt_obj))
-                    arp_frame = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vlan, qinq=qinq)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806)) as r_sock:
+                    arp_frame = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -248,10 +269,10 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                                 data = r_sock.recv(2048)
                                 if len(data) >= 14:
                                     r_pkt = Ether(data)
-                                    if r_pkt.haslayer(Dot1Q):
-                                        r_pkt = r_pkt[Dot1Q].payload
                                     if r_pkt.haslayer(ARP) and r_pkt[ARP].op == 2 and r_pkt[ARP].psrc == str(tgt_obj):
-                                        return r_pkt[ARP].hwsrc
+                                        resolved = r_pkt[ARP].hwsrc
+                                        MAC_RESOLUTION_CACHE[cache_key] = resolved
+                                        return resolved
                             except (socket.timeout, BlockingIOError):
                                 break
                 except Exception:
@@ -264,15 +285,15 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
         return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
 
 
-def wrap_l2(payload, dst_mac: str, src_mac: str, vlan: int = None, qinq: tuple = None, eth_type: int = None):
+def wrap_l2(payload, dst_mac: str, src_mac: str, vlan: int = None, qinq: tuple = None, eth_type: int = None, pcp: int = 0, dei: int = 0, qinq_tpid: int = 0x88a8):
     """Encapsulate payload in Ethernet, optional 802.1Q, or 802.1ad QinQ."""
     if qinq and len(qinq) == 2:
         s_vid, c_vid = qinq
-        inner_dot1q = Dot1Q(vlan=c_vid, type=eth_type) if eth_type else Dot1Q(vlan=c_vid)
-        return Ether(src=src_mac, dst=dst_mac, type=0x88a8) / Dot1Q(vlan=s_vid) / inner_dot1q / payload
+        inner_dot1q = Dot1Q(vlan=c_vid, prio=pcp, id=dei, type=eth_type) if eth_type else Dot1Q(vlan=c_vid, prio=pcp, id=dei)
+        return Ether(src=src_mac, dst=dst_mac, type=qinq_tpid) / Dot1Q(vlan=s_vid, prio=pcp, id=dei, type=0x8100) / inner_dot1q / payload
     elif vlan is not None and vlan > 0:
-        tag = Dot1Q(vlan=vlan, type=eth_type) if eth_type else Dot1Q(vlan=vlan)
-        return Ether(src=src_mac, dst=dst_mac) / tag / payload
+        tag = Dot1Q(vlan=vlan, prio=pcp, id=dei, type=eth_type) if eth_type else Dot1Q(vlan=vlan, prio=pcp, id=dei)
+        return Ether(src=src_mac, dst=dst_mac, type=0x8100) / tag / payload
     else:
         if eth_type:
             return Ether(src=src_mac, dst=dst_mac, type=eth_type) / payload
@@ -313,6 +334,9 @@ def parse_args():
     parser.add_argument("--src-ip6", default="", help="Custom source IPv6 address")
     parser.add_argument("--src-mac", default="", help="Custom source MAC address")
     parser.add_argument("--community", default="public", help="SNMP community string")
+    parser.add_argument("--pcp", type=int, default=0, choices=range(0, 8), help="802.1p Priority Code Point (0-7)")
+    parser.add_argument("--dei", type=int, default=0, choices=[0, 1], help="802.1Q Drop Eligible Indicator (0 or 1)")
+    parser.add_argument("--qinq-tpid", default="0x88a8", help="Outer QinQ TPID (0x88a8, 0x8100, 0x9100, 0x9200)")
     return parser.parse_args()
 
 
@@ -370,6 +394,12 @@ def main():
     src_mac = get_iface_mac(iface, args.src_mac)
     src_ll = get_link_local_ipv6(iface)
     audit_id = args.audit_id or f"probe_{int(time.time())}_{os.getpid()}"
+    pcp = args.pcp
+    dei = args.dei
+    try:
+        qinq_tpid = int(args.qinq_tpid, 0)
+    except (ValueError, TypeError):
+        qinq_tpid = 0x88a8
 
     # Parse VLAN configurations
     vlan_list = []
@@ -428,7 +458,7 @@ def main():
                         break
                     seq += 1
                     arp_req = ARP(op=1, hwsrc=src_mac, psrc=src_ip, pdst=str(host))
-                    pkt = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                    pkt = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                     try:
                         sock.send(bytes(pkt))
                     except OSError as err:
@@ -472,13 +502,15 @@ def main():
                     tgt_str = str(tgt)
                     if tgt_str == "ff02::2":
                         # RFC 4861 Sections 6.1.1 / 7.1.1: Hop Limit MUST be 255
-                        rs = IPv6(src=src_ll, dst="ff02::2", fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_RS() / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
-                        pkt = wrap_l2(rs, dst_mac="33:33:00:00:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                        rs_src = args.src_ip6 if args.src_ip6 else src_ll
+                        rs = IPv6(src=rs_src, dst="ff02::2", fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_RS() / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
+                        pkt = wrap_l2(rs, dst_mac="33:33:00:00:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                         dst_mac = "33:33:00:00:00:02"
                         ptype = "ndp_rs"
                     elif tgt_str == "ff02::1":
-                        echo = IPv6(src=src_ll, dst="ff02::1", fl=PROBE_FWMARK, hlim=255) / ICMPv6EchoRequest(id=PROBE_FWMARK, seq=seq)
-                        pkt = wrap_l2(echo, dst_mac="33:33:00:00:00:01", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                        echo_src = args.src_ip6 if args.src_ip6 else src_ll
+                        echo = IPv6(src=echo_src, dst="ff02::1", fl=PROBE_FWMARK, hlim=255) / ICMPv6EchoRequest(id=PROBE_FWMARK, seq=seq)
+                        pkt = wrap_l2(echo, dst_mac="33:33:00:00:00:01", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                         dst_mac = "33:33:00:00:00:01"
                         ptype = "ndp_echo"
                     else:
@@ -487,7 +519,7 @@ def main():
                         sn_mcast_mac = f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
                         # RFC 4861 Sections 6.1.1 / 7.1.1: Hop Limit MUST be 255
                         ns = IPv6(src=src_v6, dst=sn_mcast_ip, fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_NS(tgt=tgt_str) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
-                        pkt = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                        pkt = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                         dst_mac = sn_mcast_mac
                         ptype = "ndp_ns"
 
@@ -503,20 +535,23 @@ def main():
                     time.sleep(pacing_interval)
 
             elif args.type == "dhcp":
-                # RFC 2131 DHCPDISCOVER broadcast with Option 55 Parameter Request List
+                # RFC 2131 DHCPDISCOVER broadcast with Option 55 Parameter Request List & Option 61 Client ID
                 seq += 1
                 xid = random.randint(1, 0xFFFFFFFF)
-                mac_bytes = bytes.fromhex(src_mac.replace(":", "")) + b"\x00" * 10
+                mac_raw = bytes.fromhex(src_mac.replace(":", ""))
+                mac_bytes = mac_raw + b"\x00" * 10
+                client_id = b"\x01" + mac_raw
                 bootp_payload = BOOTP(chaddr=mac_bytes, xid=xid, flags=0x8000) / DHCP(
                     options=[
                         ("message-type", "discover"),
+                        ("client_id", client_id),
                         ("param_req_list", [1, 3, 6, 15, 28, 42]),
                         ("max_dhcp_size", 1500),
                         "end"
                     ]
                 )
                 ip_udp = IP(src="0.0.0.0", dst="255.255.255.255", id=PROBE_FWMARK) / UDP(sport=68, dport=67) / bootp_payload
-                pkt = wrap_l2(ip_udp, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                pkt = wrap_l2(ip_udp, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -534,12 +569,14 @@ def main():
                 duid = b"\x00\x03\x00\x01" + bytes.fromhex(src_mac.replace(":", ""))
                 dhcp6_payload = struct.pack("!B", 1) + struct.pack("!I", trans_id)[1:]  # Type 1 = Solicit
                 dhcp6_payload += struct.pack("!HH", 1, len(duid)) + duid  # Opt 1: Client ID
+                dhcp6_payload += struct.pack("!HH", 6, 4) + struct.pack("!HH", 23, 24)   # Opt 6: ORO (DNS Recursive Name Server & Domain Search List)
                 dhcp6_payload += struct.pack("!HHH", 8, 2, 0)             # Opt 8: Elapsed Time (RFC 8415 Section 21.9)
                 dhcp6_payload += struct.pack("!HHIII", 3, 12, 1, 0, 0)   # Opt 3: IA_NA
                 dhcp6_payload += struct.pack("!HHIII", 25, 12, 1, 0, 0)  # Opt 25: IA_PD (Prefix Delegation)
                 dhcp6_payload += struct.pack("!HH", 14, 0)               # Opt 14: Rapid Commit
-                ip_udp = IPv6(src=src_ll, dst="ff02::1:2", fl=PROBE_FWMARK) / UDP(sport=546, dport=547) / Raw(load=dhcp6_payload)
-                pkt = wrap_l2(ip_udp, dst_mac="33:33:00:01:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                dhcp6_src = args.src_ip6 if args.src_ip6 else src_ll
+                ip_udp = IPv6(src=dhcp6_src, dst="ff02::1:2", fl=PROBE_FWMARK) / UDP(sport=546, dport=547) / Raw(load=dhcp6_payload)
+                pkt = wrap_l2(ip_udp, dst_mac="33:33:00:01:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -554,14 +591,24 @@ def main():
                 is_v6 = ":" in (args.target or "")
                 if is_v6:
                     target_ip = args.target or "2001:db8::1"
+                    try:
+                        ipaddress.ip_address(target_ip)
+                    except ValueError as err:
+                        sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
+                        sys.exit(1)
                     sizes = [1280, 1420, 1500, 2000, 4000, 9000]
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
                     target_ip = args.target or "192.168.1.1"
+                    try:
+                        ipaddress.ip_address(target_ip)
+                    except ValueError as err:
+                        sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
+                        sys.exit(1)
                     sizes = [576, 1280, 1420, 1450, 1492, 1500, 2000, 4000, 9000]
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 for sz in sizes:
                     if time.monotonic() > deadline:
@@ -576,7 +623,7 @@ def main():
                         payload_len = max(0, sz - 20 - 8)
                         echo_pkt = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK, flags="DF") / ICMP(type=8, id=PROBE_FWMARK, seq=seq) / Raw(b"X" * payload_len)
 
-                    pkt = wrap_l2(echo_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                    pkt = wrap_l2(echo_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                     try:
                         sock.send(bytes(pkt))
                         log_audit(audit_f, audit_id, "pmtu", target_ip, vid, args.qinq, src_mac, dst_mac, seq,
@@ -593,14 +640,18 @@ def main():
 
             elif args.type == "tcp_syn":
                 is_v6 = ":" in (args.target or "")
+                target_ip = args.target or ("2001:db8::1" if is_v6 else "192.168.1.1")
+                try:
+                    ipaddress.ip_address(target_ip)
+                except ValueError as err:
+                    sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
+                    sys.exit(1)
                 if is_v6:
-                    target_ip = args.target or "2001:db8::1"
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
-                    target_ip = args.target or "192.168.1.1"
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 raw_ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
                 port_list = [p for p in raw_ports if 1 <= p <= 65535]
@@ -618,7 +669,7 @@ def main():
                     else:
                         syn_pkt = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / tcp_layer
 
-                    pkt = wrap_l2(syn_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                    pkt = wrap_l2(syn_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                     try:
                         sock.send(bytes(pkt))
                     except OSError as err:
@@ -634,7 +685,7 @@ def main():
                 seq += 1
                 eapol_payload = b"\x01\x01\x00\x00"  # Version 1, Type 1 (Start), Length 0
                 pkt = wrap_l2(Raw(load=eapol_payload), dst_mac="01:80:c2:00:00:03", src_mac=src_mac,
-                              vlan=vid, qinq=qinq_tuple, eth_type=0x888e)
+                              vlan=vid, qinq=qinq_tuple, eth_type=0x888e, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -648,13 +699,18 @@ def main():
             elif args.type == "snmp":
                 # Single-packet SNMPv2c sysDescr.0 GetRequest on UDP 161
                 target_ip = args.target or "192.168.1.1"
+                try:
+                    ipaddress.ip_address(target_ip)
+                except ValueError as err:
+                    sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
+                    sys.exit(1)
                 is_v6 = ":" in target_ip
                 if is_v6:
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 seq += 1
                 sport = random.randint(30000, 60000)
@@ -665,7 +721,7 @@ def main():
                     ip_udp = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / UDP(sport=sport, dport=161) / snmp_pdu
                 else:
                     ip_udp = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / UDP(sport=sport, dport=161) / snmp_pdu
-                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -679,13 +735,18 @@ def main():
             elif args.type == "dns":
                 # Single-packet DNS CHAOS TXT version.bind query on UDP 53
                 target_ip = args.target or "192.168.1.1"
+                try:
+                    ipaddress.ip_address(target_ip)
+                except ValueError as err:
+                    sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
+                    sys.exit(1)
                 is_v6 = ":" in target_ip
                 if is_v6:
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 seq += 1
                 sport = random.randint(30000, 60000)
@@ -694,7 +755,7 @@ def main():
                     ip_udp = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / UDP(sport=sport, dport=53) / dns_payload
                 else:
                     ip_udp = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / UDP(sport=sport, dport=53) / dns_payload
-                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -708,9 +769,14 @@ def main():
             elif args.type == "nbns":
                 # RFC 1002 NetBIOS Name Service Node Status Query on UDP 137
                 target_ip = args.target or "255.255.255.255"
+                try:
+                    ipaddress.ip_address(target_ip)
+                except ValueError as err:
+                    sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
+                    sys.exit(1)
                 is_bcast = (target_ip == "255.255.255.255")
                 src_ip = resolve_source_ip(iface, target_ip if not is_bcast else "", args.src_ip)
-                dst_mac = "ff:ff:ff:ff:ff:ff" if is_bcast else resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple)
+                dst_mac = "ff:ff:ff:ff:ff:ff" if is_bcast else resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 seq += 1
                 sport = random.randint(30000, 60000)
@@ -719,7 +785,7 @@ def main():
                 nbns_q = struct.pack("!HH", 0x0021, 0x0001)  # NBSTAT, IN
                 nbns_payload = nbns_hdr + nbns_name + nbns_q
                 ip_udp = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / UDP(sport=sport, dport=137) / Raw(load=nbns_payload)
-                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
+                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:

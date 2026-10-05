@@ -125,6 +125,87 @@ assert_fail "(required|requires root privileges)" "$BIN_PATH" probe
 assert_success "$BIN_PATH" list
 assert_success "$BIN_PATH" list -j
 
+# --- 1b. Mock Session State Enumeration (list & list -j) ---
+MOCK_STATE_DIR=$(mktemp -d /tmp/net_tap_mock_state.XXXXXX)
+chmod 755 "${MOCK_STATE_DIR}"
+sleep 15 &
+MOCK_PID=$!
+
+cat <<EOF > "${MOCK_STATE_DIR}/mockif0.state"
+declare -- IFACE="mockif0"
+declare -- MODE="passive"
+declare -- HW_TYPE="ethernet"
+declare -- TIMESTAMP="20261005_120000"
+declare -- NETNS=""
+declare -- ROTATE_SIZE="100"
+declare -- ROTATE_COUNT="10"
+declare -- OUT_DIR="/tmp"
+declare -a PIDS_TCPDUMP=([0]="${MOCK_PID}")
+declare -a PIDS_DMESG=()
+declare -a PIDS_IPMON=()
+declare -a PCAP_FILES=()
+declare -a DMESG_LOGS=()
+declare -a LINK_LOGS=()
+declare -a TCPDUMP_ERRS=()
+declare -a CONFIGURED_IFACES=()
+declare -- PID_WATCHDOG=""
+declare -- PID_AUTOSHUTDOWN=""
+EOF
+chmod 600 "${MOCK_STATE_DIR}/mockif0.state"
+
+cat <<EOF > "${MOCK_STATE_DIR}/staleif0.state"
+declare -- IFACE="staleif0"
+declare -- MODE="passive"
+declare -- HW_TYPE="ethernet"
+declare -- TIMESTAMP="20261005_110000"
+declare -- NETNS=""
+declare -- ROTATE_SIZE="100"
+declare -- ROTATE_COUNT="10"
+declare -- OUT_DIR="/tmp"
+declare -a PIDS_TCPDUMP=([0]="99999999")
+declare -a PIDS_DMESG=()
+declare -a PIDS_IPMON=()
+declare -a PCAP_FILES=()
+declare -a DMESG_LOGS=()
+declare -a LINK_LOGS=()
+declare -a TCPDUMP_ERRS=()
+declare -a CONFIGURED_IFACES=()
+declare -- PID_WATCHDOG=""
+declare -- PID_AUTOSHUTDOWN=""
+EOF
+chmod 600 "${MOCK_STATE_DIR}/staleif0.state"
+
+echo -n "[TEST] Validating net-tap list with active and stale sessions... "
+MOCK_LIST_TXT=$(STATE_DIR="${MOCK_STATE_DIR}" "$BIN_PATH" list 2>/dev/null || true)
+if echo "${MOCK_LIST_TXT}" | grep -q "RUNNING" && echo "${MOCK_LIST_TXT}" | grep -q "STALE"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Validating net-tap list -j JSON output with active and stale sessions... "
+MOCK_LIST_JSON=$(STATE_DIR="${MOCK_STATE_DIR}" "$BIN_PATH" list -j 2>/dev/null || echo "[]")
+if python3 -B -c "
+import json, sys
+data = json.loads(sys.argv[1])
+assert len(data) == 2
+mock0 = next(s for s in data if s['interface'] == 'mockif0')
+stale0 = next(s for s in data if s['interface'] == 'staleif0')
+assert mock0['status'] == 'RUNNING'
+assert stale0['status'] == 'STALE'
+" "${MOCK_LIST_JSON}" >/dev/null 2>&1; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+kill "${MOCK_PID}" 2>/dev/null || true
+rm -rf "${MOCK_STATE_DIR}"
+
 # --- 2. Input Validation Tests ---
 assert_fail "Invalid interface name format" "$BIN_PATH" status -i "bad;name"
 assert_fail "Invalid interface name format" "$BIN_PATH" status -i "eth0,bad;eth1"
@@ -332,6 +413,17 @@ if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; 
         assert_jq '.protocols.tcp_flags.urg > 0'
         assert_jq '.protocols.tcp_flags.zero_window >= 1'
         assert_jq '.protocols.tcp_flags.retransmission >= 1'
+        assert_jq '.protocols.ipv6_extension_headers.hop_by_hop == 1'
+        assert_jq '.protocols.ipv6_extension_headers.routing == 1'
+        assert_jq '.protocols.ipv6_extension_headers.fragment == 1'
+        assert_jq '.protocols.ipv6_extension_headers.esp == 1'
+        assert_jq '.protocols.ipv6_extension_headers.ah == 1'
+        assert_jq '.protocols.tcp_options.mss == 1'
+        assert_jq '.protocols.tcp_options.wscale == 1'
+        assert_jq '.protocols.tcp_options.sack_permitted == 1'
+        assert_jq '.top_talkers.ipv4 | length > 0'
+        assert_jq '.top_talkers.ipv6 | length > 0'
+        assert_jq '.top_talkers.flows | length > 0'
         assert_jq '.infrastructure_frames.lldp == 1'
         assert_jq '.infrastructure_frames.cdp == 1'
         assert_jq '.infrastructure_frames.stp == 1'
@@ -585,6 +677,60 @@ except jsonschema.ValidationError:
             PASSED=$((PASSED + 1))
         else
             echo "FAILED (Schema failed to reject invalid IP in discovered_hosts)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema rejection of invalid vlans_probed... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['bad_vlan_9999'],
+    'discovered_hosts': []
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject invalid vlans_probed)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema rejection of invalid discovered_hosts vlan... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged'],
+    'discovered_hosts': [
+        {'ip': '192.0.2.1', 'mac': '02:00:00:11:22:33', 'vlan': '99999'}
+    ]
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject invalid discovered_hosts vlan)"
             FAILED=$((FAILED + 1))
         fi
 

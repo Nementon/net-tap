@@ -27,7 +27,7 @@ import time
 try:
     from scapy.all import (
         Ether, Dot1Q, ARP, IP, IPv6, ICMP, UDP, BOOTP, DHCP, TCP,
-        ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6EchoRequest, Raw
+        ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, Raw
     )
 except ImportError as err:
     sys.stderr.write(f"ERROR: Scapy is required for net-tap probe ({err}).\n")
@@ -41,12 +41,11 @@ SIOCGIFHWADDR = 0x8927  # Linux ioctl to get hardware MAC address
 def get_iface_mac(iface: str) -> str:
     """Retrieve physical MAC address of interface using SIOCGIFHWADDR ioctl with sysfs fallback."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        info = fcntl.ioctl(s.fileno(), SIOCGIFHWADDR, struct.pack('256s', iface[:15].encode('utf-8')))
-        s.close()
-        mac = ':'.join(f'{b:02x}' for b in info[18:24])
-        if mac and len(mac) == 17 and mac != "00:00:00:00:00:00":
-            return mac
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            info = fcntl.ioctl(s.fileno(), SIOCGIFHWADDR, struct.pack('256s', iface[:15].encode('utf-8')))
+            mac = ':'.join(f'{b:02x}' for b in info[18:24])
+            if mac and len(mac) == 17 and mac != "00:00:00:00:00:00":
+                return mac
     except Exception:
         pass
     try:
@@ -60,7 +59,19 @@ def get_iface_mac(iface: str) -> str:
 
 
 def get_link_local_ipv6(iface: str) -> str:
-    """Extract or construct link-local IPv6 address for interface using EUI-64."""
+    """Query assigned link-local IPv6 address for interface with EUI-64 fallback."""
+    try:
+        if os.path.exists("/proc/net/if_inet6"):
+            with open("/proc/net/if_inet6", "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 6 and parts[5] == iface:
+                        raw_ip = parts[0]
+                        if raw_ip.lower().startswith("fe80"):
+                            chunks = [raw_ip[i:i+4] for i in range(0, 32, 4)]
+                            return ipaddress.IPv6Address(":".join(chunks)).compressed
+    except Exception:
+        pass
     try:
         mac_str = get_iface_mac(iface)
         octets = [int(x, 16) for x in mac_str.split(":")]
@@ -69,6 +80,44 @@ def get_link_local_ipv6(iface: str) -> str:
         return f"fe80::{eui64}"
     except Exception:
         return "fe80::1"
+
+
+def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool) -> str:
+    """Resolve destination MAC for target IP using kernel neighbor cache with fallback."""
+    try:
+        if is_v6:
+            if target_ip.lower().startswith("ff"):
+                return "33:33:00:00:00:01"
+            with os.popen(f"ip -6 neigh show dev {iface} {target_ip} 2>/dev/null") as p:
+                for line in p.read().splitlines():
+                    parts = line.split()
+                    if "lladdr" in parts:
+                        idx = parts.index("lladdr")
+                        if idx + 1 < len(parts):
+                            return parts[idx + 1]
+            tgt_obj = ipaddress.IPv6Address(target_ip)
+            last_24 = tgt_obj.exploded[-7:].replace(":", "")
+            return f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
+        else:
+            if target_ip == "255.255.255.255":
+                return "ff:ff:ff:ff:ff:ff"
+            if os.path.exists("/proc/net/arp"):
+                with open("/proc/net/arp", "r") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 6 and parts[0] == target_ip and parts[5] == iface:
+                            if parts[3] != "00:00:00:00:00:00":
+                                return parts[3]
+            with os.popen(f"ip -4 neigh show dev {iface} {target_ip} 2>/dev/null") as p:
+                for line in p.read().splitlines():
+                    parts = line.split()
+                    if "lladdr" in parts:
+                        idx = parts.index("lladdr")
+                        if idx + 1 < len(parts):
+                            return parts[idx + 1]
+            return "ff:ff:ff:ff:ff:ff"
+    except Exception:
+        return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
 
 
 def wrap_l2(payload, dst_mac: str, src_mac: str, vlan: int = None, qinq: tuple = None):
@@ -241,8 +290,8 @@ def main():
                     try:
                         net = ipaddress.ip_network(target_str, strict=False)
                         if net.prefixlen < 120:
-                            suffixes = ["::1", "::2", "::fe", "::ff", "::100", "::254"]
-                            probe_ips = [ipaddress.IPv6Address(f"{net.network_address}{s}") for s in suffixes]
+                            offsets = [1, 2, 0xfe, 0xff, 0x100, 0x254]
+                            probe_ips = [net.network_address + off for off in offsets]
                         else:
                             probe_ips = list(net.hosts())
                     except ValueError as err:
@@ -265,7 +314,7 @@ def main():
                     seq += 1
                     tgt_str = str(tgt)
                     if tgt_str == "ff02::2":
-                        rs = IPv6(src=src_ll, dst="ff02::2", fl=PROBE_FWMARK) / ICMPv6ND_RS()
+                        rs = IPv6(src=src_ll, dst="ff02::2", fl=PROBE_FWMARK) / ICMPv6ND_RS() / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                         pkt = wrap_l2(rs, dst_mac="33:33:00:00:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
                         dst_mac = "33:33:00:00:00:02"
                         ptype = "ndp_rs"
@@ -278,12 +327,16 @@ def main():
                         last_24 = tgt.exploded[-7:].replace(":", "")
                         sn_mcast_ip = f"ff02::1:ff{last_24[:2]}:{last_24[2:]}"
                         sn_mcast_mac = f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
-                        ns = IPv6(src=src_ll, dst=sn_mcast_ip, fl=PROBE_FWMARK) / ICMPv6ND_NS(tgt=tgt_str)
+                        ns = IPv6(src=src_ll, dst=sn_mcast_ip, fl=PROBE_FWMARK) / ICMPv6ND_NS(tgt=tgt_str) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                         pkt = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
                         dst_mac = sn_mcast_mac
                         ptype = "ndp_ns"
 
-                    sock.send(bytes(pkt))
+                    try:
+                        sock.send(bytes(pkt))
+                    except OSError as err:
+                        sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
+                        break
                     log_audit(audit_f, audit_id, ptype, tgt_str, vid, args.qinq, src_mac, dst_mac, seq)
                     packet_count += 1
                     if packet_count % 50 == 0:
@@ -298,7 +351,11 @@ def main():
                 bootp_payload = BOOTP(chaddr=mac_bytes, xid=xid, flags=0x8000) / DHCP(options=[("message-type", "discover"), "end"])
                 ip_udp = IP(src="0.0.0.0", dst="255.255.255.255", id=PROBE_FWMARK) / UDP(sport=68, dport=67) / bootp_payload
                 pkt = wrap_l2(ip_udp, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
-                sock.send(bytes(pkt))
+                try:
+                    sock.send(bytes(pkt))
+                except OSError as err:
+                    sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
+                    break
                 log_audit(audit_f, audit_id, "dhcp", "255.255.255.255", vid, args.qinq, src_mac, "ff:ff:ff:ff:ff:ff", seq,
                           {"xid": hex(xid)})
                 packet_count += 1
@@ -311,12 +368,17 @@ def main():
                 duid = b"\x00\x03\x00\x01" + bytes.fromhex(src_mac.replace(":", ""))
                 dhcp6_payload = struct.pack("!B", 1) + struct.pack("!I", trans_id)[1:]  # Type 1 = Solicit
                 dhcp6_payload += struct.pack("!HH", 1, len(duid)) + duid  # Opt 1: Client ID
+                dhcp6_payload += struct.pack("!HHH", 8, 2, 0)             # Opt 8: Elapsed Time (RFC 8415 Section 21.9)
                 dhcp6_payload += struct.pack("!HHIII", 3, 12, 1, 0, 0)   # Opt 3: IA_NA
                 dhcp6_payload += struct.pack("!HHIII", 25, 12, 1, 0, 0)  # Opt 25: IA_PD (Prefix Delegation)
                 dhcp6_payload += struct.pack("!HH", 14, 0)               # Opt 14: Rapid Commit
                 ip_udp = IPv6(src=src_ll, dst="ff02::1:2", fl=PROBE_FWMARK) / UDP(sport=546, dport=547) / Raw(load=dhcp6_payload)
                 pkt = wrap_l2(ip_udp, dst_mac="33:33:00:01:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
-                sock.send(bytes(pkt))
+                try:
+                    sock.send(bytes(pkt))
+                except OSError as err:
+                    sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
+                    break
                 log_audit(audit_f, audit_id, "dhcp6_solicit", "ff02::1:2", vid, args.qinq, src_mac, "33:33:00:01:00:02", seq,
                           {"trans_id": hex(trans_id)})
                 packet_count += 1
@@ -327,11 +389,11 @@ def main():
                 if is_v6:
                     target_ip = args.target or "2001:db8::1"
                     sizes = [1280, 1420, 1500, 2000, 4000, 9000]
-                    dst_mac = "33:33:00:00:00:01"
+                    dst_mac = resolve_dst_mac(iface, target_ip, True)
                 else:
                     target_ip = args.target or "192.168.1.1"
                     sizes = [1500, 2000, 4000, 9000]
-                    dst_mac = "ff:ff:ff:ff:ff:ff"
+                    dst_mac = resolve_dst_mac(iface, target_ip, False)
 
                 for sz in sizes:
                     if time.monotonic() > deadline:
@@ -357,17 +419,18 @@ def main():
                             log_audit(audit_f, audit_id, "pmtu", target_ip, vid, args.qinq, src_mac, dst_mac, seq,
                                       {"probed_mtu": sz, "payload_len": payload_len, "ip_version": 6 if is_v6 else 4, "status": "local_mtu_exceeded"})
                         else:
-                            raise
+                            sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
+                            break
                     time.sleep(pacing_interval)
 
             elif args.type == "tcp_syn":
                 is_v6 = ":" in (args.target or "")
                 if is_v6:
                     target_ip = args.target or "2001:db8::1"
-                    dst_mac = "33:33:00:00:00:01"
+                    dst_mac = resolve_dst_mac(iface, target_ip, True)
                 else:
                     target_ip = args.target or "192.168.1.1"
-                    dst_mac = "ff:ff:ff:ff:ff:ff"
+                    dst_mac = resolve_dst_mac(iface, target_ip, False)
 
                 raw_ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
                 port_list = [p for p in raw_ports if 1 <= p <= 65535]
@@ -386,7 +449,11 @@ def main():
                         syn_pkt = IP(src="192.0.2.2", dst=target_ip, id=PROBE_FWMARK) / tcp_layer
 
                     pkt = wrap_l2(syn_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
-                    sock.send(bytes(pkt))
+                    try:
+                        sock.send(bytes(pkt))
+                    except OSError as err:
+                        sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
+                        break
                     log_audit(audit_f, audit_id, "tcp_syn", target_ip, vid, args.qinq, src_mac, dst_mac, seq,
                               {"dport": port, "sport": sport, "ip_version": 6 if is_v6 else 4})
                     packet_count += 1

@@ -46,6 +46,8 @@
     - [Probe 4: Stepped Path MTU Discovery (PMTUD)](#probe-4-stepped-path-mtu-discovery-pmtud)
     - [Probe 5: Lightweight TCP SYN Probing](#probe-5-lightweight-tcp-syn-probing)
     - [Smart Passive-to-Active Discovery (--auto-vlans)](#smart-passive-to-active-discovery---auto-vlans)
+  - [8. Session Enumeration & Fleet Management (list)](#8-session-enumeration--fleet-management-list)
+  - [9. Disaster Recovery & Orphan Reconciler (clean)](#9-disaster-recovery--orphan-reconciler-clean)
 - [Sample Analysis Output](#sample-analysis-output)
   - [Human-Readable Terminal Dashboard](#human-readable-terminal-dashboard)
   - [Structured JSON Export Schema](#structured-json-export-schema)
@@ -87,7 +89,7 @@ net-tap analyze -d /data/trace
 | **Selective Egress & Active Watermarking** | Traditional active scanning tools trigger IDS alarms and alert remote firewalls by leaking unprompted kernel TCP RSTs and OS chatter. In `--mode active`, `net-tap` configures a selective kernel egress filter (`tc filter ... fwmark 0x7a9 pass` followed by `matchall drop`) that strictly permits authorized, watermarked probe frames (IPv4 IP ID `0x07a9`, IPv6 Flow Label `0x007a9`, ICMP Echo ID `1961`, socket mark `0x7a9`) while dropping 100% of host OS background chatter. |
 | **Non-Destructive Stealth Sysctls (36 Total)** | Naively setting `disable_ipv6=1` purges static and autoconfigured IPv6 addresses permanently. `net-tap` NEVER sets `disable_ipv6=1`. Instead, it applies 36 non-destructive stealth sysctls across IPv4 and IPv6: IPv6 (`keep_addr_on_down=1`, `addr_gen_mode=1`, `use_tempaddr=0`, `enhanced_dad=0`, `ndisc_notify=0`, `accept_redirects=0`, `router_solicitations=0`, `accept_dad=0`, `dad_transmits=0`, `accept_ra=0`, `autoconf=0`, `mldv1_unsolicited_report_interval=0`, `mldv2_unsolicited_report_interval=0`, `force_mld_version=2`, `drop_unsolicited_na=1`, `accept_untracked_na=0`, `forwarding=0`, `mc_forwarding=0`) and IPv4 (`arp_ignore=8`, `arp_announce=2`, `arp_filter=1`, `arp_notify=0`, `drop_gratuitous_arp=1`, `arp_accept=0`, `proxy_arp=0`, `proxy_arp_pvlan=0`, `send_redirects=0`, `accept_redirects=0`, `secure_redirects=0`, `drop_unicast_in_l2_multicast=1`, `igmpv2_unsolicited_report_interval=0`, `igmpv3_unsolicited_report_interval=0`, `force_igmp_version=3`, `forwarding=0`, `mc_forwarding=0`, `bc_forwarding=0`), faithfully restoring all original values (and interface operstate) on exit. |
 | **Connection Tracking (`conntrack`) Protection** | Mirrored line-rate SPAN traffic quickly overwhelms the Netfilter state table, causing kernel memory exhaustion and dropping legitimate host traffic. `net-tap` installs raw `PREROUTING` and `OUTPUT` `NOTRACK` rules in `iptables` and `ip6tables` to bypass connection tracking entirely. |
-| **Microburst Loss & Ring-Buffer Protection** | High-speed links easily drop packets at the socket buffer or fill physical drives. `net-tap` dynamically maximizes hardware Rx descriptor rings to the NIC's preset maximum (via `ethtool -g`, falling back to 4096), provisions a 64 MB `libpcap` buffer (`-B 65536`), disables all 6 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, `rxvlan`) to preserve exact frame boundaries, enables nanosecond timestamping (`--time-stamp-precision nano`), and enforces strict rotating chunk limits with active 1-second filesystem threshold monitoring. |
+| **Microburst Loss & Ring-Buffer Protection** | High-speed links easily drop packets at the socket buffer or fill physical drives. `net-tap` dynamically maximizes hardware Rx descriptor rings to the NIC's preset maximum (via `ethtool -g`, falling back to 4096), provisions a 64 MB `libpcap` buffer (`-B 65536`), disables all 7 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, `rxvlan`, `rx-vlan-filter`) and enables `rx-all` to preserve exact frame boundaries, enables nanosecond timestamping (`--time-stamp-precision nano`), and enforces strict rotating chunk limits with active 2-second filesystem threshold monitoring. |
 | **Dual-Stack & Telecom Reconnaissance** | Rather than requiring manual Wireshark inspection, `net-tap` parses PCAP headers dynamically to discover VLAN trunks, 802.1ad and legacy (`0x9100`/`0x9200`) QinQ, IPv4 /24 subnets, IPv6 SLAAC prefixes, overlay and carrier tunnels (VXLAN, GTP-U, GTP-C, Geneve, GRE, 6in4, 4in6, SRv6, MPLS), Path MTU Discovery (PMTUD), SCTP signaling, TCP connection handshakes/flags (SYN, SYN-ACK, RST, FIN, PSH, URG, zero-window, retransmissions), carrier routing (IS-IS, BFD, OSPFv2, OSPFv3, BGP), and L4-L7 application metadata (DNS, TLS SNI, SNMP). |
 | **Namespace Isolation** | Monitoring virtual routers, Kubernetes CNIs, or mobile 5G UPF nodes requires network namespace awareness. `net-tap` natively supports running isolated captures within Linux Network Namespaces (`ip netns`). |
 | **Atomic Locking & Rollback** | Employs dynamic file descriptors, an atomic master serialization lock (`.lock_master`), and dedicated per-interface file locks (`.lock_[<ns>__]<dev>`) supporting arbitrary numbers of concurrent interfaces. If an invalid BPF filter is provided, a bridge master is detected, or `tcpdump` fails to spawn, `net-tap` catches the error and immediately restores the interface to its original pre-tap state without touching unaffected ports. Strict `INT`, `TERM`, `HUP`, and `EXIT` signal traps guarantee that egress filters, firewall rules, and state files are cleaned up even during forced interruptions. |
@@ -155,7 +157,7 @@ flowchart LR
 * **Non-Destructive IPv4/IPv6 Sysctls**: Silences ARP broadcasts, IPv6 Router Solicitations, Duplicate Address Detection (DAD), and SLAAC autoconfiguration without flushing assigned interface addresses.
 * **Netfilter NOTRACK & Drop Bypassing**: Installs `NOTRACK` and `DROP` targets in the `raw` table for both IPv4 and IPv6 to prevent mirrored traffic from overflowing `nf_conntrack` and block locally generated socket traffic.
 * **Elevated Jumbo MTU (up to 9216)**: Automatically elevates the interface MTU up to 9216 bytes (or driver max MTU, minimum 9000) during capture to prevent the kernel from dropping 802.1Q tagged frames, QinQ double-tagged frames, or encapsulated overlay packets.
-* **Complete Hardware Offload Neutralization**: Temporarily disables all 6 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, and `rxvlan`) during capture so packet boundaries and timestamps remain unaltered, restoring each offload, PAUSE flow control, and EEE on teardown.
+* **Complete Hardware Offload Neutralization**: Temporarily disables all 7 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, `rxvlan`, and `rx-vlan-filter`) and enables `rx-all on` during capture so packet boundaries and timestamps remain unaltered, restoring each offload, PAUSE flow control, and EEE on teardown.
 * **Administrative DOWN Teardown Protection**: When unbinding from a tapped link, the interface is restored and left administratively `DOWN` to prevent temporal kernel emission spikes (DAD, MLDv2, ARP) onto live customer links.
 
 ### Controlled Active Auditing & Selective Egress
@@ -169,7 +171,7 @@ flowchart LR
 * **64 MB Dedicated `libpcap` Buffer**: Configures `tcpdump` with `-B 65536` to absorb microbursts without userspace packet drops.
 * **Automated Dual-Port Optical Tap Aggregation**: Ingests bidirectional Tx/Rx feeds from two interfaces simultaneously (e.g., `-i sfp0,sfp1`) and automatically merges them chronologically using `mergecap` on teardown.
 * **Auto-Shutdown Duration Timer (`-D`)**: Runs an automated background watchdog that gracefully terminates the capture and restores the NIC after a specified number of seconds.
-* **High-Frequency Storage Watchdog & Gzip Compression**: Supports on-the-fly rotated chunk compression (`-z`) and runs a background storage monitor (1s polling, `-w`, default: 85% disk usage or <512MB absolute headroom) that triggers an emergency teardown if disk space is endangered.
+* **High-Frequency Storage Watchdog & Gzip Compression**: Supports on-the-fly rotated chunk compression (`-z`) and runs a background storage monitor (2s polling, `-w`, default: 85% disk usage or $\le 1024\text{ MB}$ absolute headroom threshold) that triggers an emergency teardown if disk space is endangered.
 * **Syslog Auditing**: Mirrors all tap activation, teardown, watchdog triggers, and error events to `logger` for centralized enterprise log auditing.
 
 ### Dual-Stack & Deep Protocol Inspection (DPI)
@@ -214,6 +216,8 @@ flowchart LR
 | `net-tap status` | **Unprivileged** (standard user on host; requires `sudo` or `CAP_SYS_ADMIN` for `-n <netns>`) | Live-reads carrier state, ethtool statistics, and capture directory file sizes without requiring elevated privileges. Querying an isolated network namespace via `-n <netns>` requires `CAP_SYS_ADMIN` to execute `ip netns exec`. |
 | `net-tap analyze` | **Unprivileged** (standard user) | Reads PCAP files and metadata logs offline; requires standard read permissions on the target directory and disk headroom in `${TMPDIR:-/tmp}` ($\ge \max(50\text{ MB}, 3 \times \text{total PCAP size})$). |
 | `net-tap probe` | **Root / Sudo** or **Linux Capabilities** (`CAP_NET_RAW` + `CAP_NET_ADMIN`; requires `CAP_SYS_ADMIN` if `-n <netns>` is used) | Binds raw `AF_PACKET` sockets, applies `SO_MARK 0x7a9`, crafts L2/L3 frames, and transmits active audit probes. |
+| `net-tap list` | **Unprivileged** (standard user on host; requires `sudo` or `CAP_SYS_ADMIN` for `-n <netns>`) | Enumerates running and stale monitoring sessions and background process PIDs across namespaces. |
+| `net-tap clean` | **Root / Sudo** or **Linux Capabilities** (`CAP_NET_ADMIN` + `CAP_NET_RAW` + `CAP_KILL`) | Reconciles crashed sessions, terminates orphaned processes, purges stale locks, and detaches dangling egress drop filters. |
 
 #### Running with Linux Capabilities (Rootless Tap)
 To run `net-tap on` without `sudo`, grant ambient capabilities via `capsh`:
@@ -245,7 +249,8 @@ sudo capsh --user=$USER --inh=cap_net_admin,cap_net_raw,cap_sys_admin --addamb=c
 * `tshark` (Wireshark CLI): Unlocks L4-L7 Deep Protocol Inspection (DNS, TLS SNI, SNMP, DHCP hostnames, OSPF, BGP).
 * `mergecap` (Wireshark suite): Enables automatic chronological merging of Dual-Port optical tap captures (`sfp0,sfp1`).
 * `jq`: Recommended for automated validation of `--json` analysis outputs in scripts or CI pipelines.
-* `python3-scapy` & `python3-jsonschema`: Required for running synthetic carrier fixture generation and Draft-7 schema validation.
+* `python3-scapy`: Strictly required for active probing (`net-tap probe`) and generating synthetic test fixtures.
+* `python3-jsonschema`: Required for Draft-7 JSON schema verification and CI/CD compliance suites.
 
 ### Quick Package Installation
 
@@ -378,7 +383,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `STATE_DIR` | Directory for active session state files and per-interface process locks. | `/var/run/net-tap` |
-| `NET_TAP_LIB_DIR` | Custom directory containing `core.sh`, `orchestration.sh`, and `analyzer.sh`. | `/usr/local/lib/net-tap` or `../lib` |
+| `NET_TAP_LIB_DIR` | Custom directory containing `core.sh`, `orchestration.sh`, `analyzer.sh`, `probe.sh`, and `probe.py`. | `/usr/local/lib/net-tap` or `../lib` |
 | `TMPDIR` | Custom temporary directory for analyzer header caching and parsing. | `/tmp` |
 | `COMPRESS_PCAPS` | When set to `1`, forces gzip compression on rotated PCAP chunks (`-z`). | `0` |
 | `JSON_OUT` | When set to `1`, forces `analyze` to emit JSON output (`--json`). | `0` |
@@ -584,7 +589,7 @@ The `--arp-scan <cidr>` probe actively discovers live IPv4 hosts on an untagged 
 **Implementation Details:**
 - **Packet Crafting**: [`lib/probe.py`](lib/probe.py) synthesizes raw Ethernet frames (`Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(op="who-has", pdst=ip)`) with the sender IP set to `0.0.0.0` (or user override) and sender MAC set to the interface hardware MAC (or spoofed MAC).
 - **VLAN Tagging**: When `--vlan <spec>` (single ID `100`, list `10,20`, or range `10-20`) or `--qinq <outer>,<inner>` is specified, Scapy prepends `Dot1Q` headers directly in user space without requiring kernel VLAN sub-interfaces (`eth1.100`).
-- **Response Handling**: The prober transmits frames at the specified `--rate` (default: 100 pps). Incoming ARP replies (`op="is-at"`) are captured passively by the background `tcpdump` process into the rotating PCAP ring buffer.
+- **Response Handling**: The prober transmits frames at the specified `--rate` (default: 50 pps). Incoming ARP replies (`op="is-at"`) are captured passively by the background `tcpdump` process into the rotating PCAP ring buffer.
 - **Offline Correlation**: During `net-tap analyze`, [`lib/analyzer.sh`](lib/analyzer.sh) cross-references the probe audit log with the PCAP ring buffer to extract host IP, responding MAC, and correlated VLAN tag.
 
 ```mermaid
@@ -700,21 +705,16 @@ sequenceDiagram
     participant PCAP as tcpdump (Passive Ring Buffer)
     participant Analyzer as net-tap analyze
 
-    Note over Probe,Target: Step 1: Probe MTU 1492 (DF=1)
-    Probe->>Local_NIC: ICMP Echo Req (size 1492, DF=1) [mark 0x7a9]
-    Local_NIC->>Router: Forward Frame
-    Router->>Target: Forward Frame
-    Target-->>PCAP: ICMP Echo Reply (size 1492) -> Captured
-    Note over Probe,Target: Step 2: Probe MTU 1500 (DF=1)
+    Note over Probe,Target: Step 1: Probe Standard Envelope 1500B (DF=1)
     Probe->>Local_NIC: ICMP Echo Req (size 1500, DF=1) [mark 0x7a9]
     Local_NIC->>Router: Forward Frame
     Router-->>PCAP: ICMP Type 3 Code 4: Frag Needed (Next-Hop MTU 1492) -> Captured
-    Note over Probe,Target: Step 3: Probe MTU 9000 (DF=1) on MTU 1500 Link
-    Probe->>Local_NIC: ICMP Echo Req (size 9000, DF=1) [mark 0x7a9]
-    Local_NIC-->>Probe: OSError 90 (EMSGSIZE: local_mtu_exceeded)
+    Note over Probe,Target: Step 2: Probe Stepped Envelopes [2000, 4000, 9000B] (DF=1)
+    Probe->>Local_NIC: ICMP Echo Req (size 2000, DF=1) [mark 0x7a9]
+    Local_NIC-->>Probe: OSError 90 (EMSGSIZE: local_mtu_exceeded if NIC MTU 1500)
     Probe->>Probe: Log local_mtu_exceeded in probe_audit.jsonl
     Analyzer->>Analyzer: Correlate probe_audit.jsonl + chunk.pcap
-    Analyzer-->>Analyzer: Path MTU Confirmed: 1492 bytes (Router enforced)
+    Analyzer-->>Analyzer: Path MTU Confirmed: 1492 bytes (Router enforced via PTB/Frag Needed)
 ```
 
 ---
@@ -789,6 +789,65 @@ flowchart TD
         PCAP --> ANALYZE["net-tap analyze<br/>Multi-VLAN Host & Service Matrix"]
     end
 ```
+
+---
+
+### 8. Session Enumeration & Fleet Management (`list`)
+
+`net-tap list` provides centralized visibility into all active and historical capture sessions across the host and network namespaces:
+
+```bash
+# List all active sessions in human-readable table format
+net-tap list
+
+# Filter sessions by network namespace
+net-tap list -n prod_vrf
+
+# Filter sessions by network interface
+net-tap list -i eth0
+
+# Output structured JSON array for fleet orchestration & monitoring
+net-tap list -j
+```
+
+**JSON Output Example:**
+```json
+[
+  {
+    "interface": "eth0",
+    "netns": null,
+    "mode": "passive",
+    "pid": 12345,
+    "status": "RUNNING",
+    "output_dir": "/data/trace",
+    "timestamp": "20261005_120000",
+    "chunks": 4
+  }
+]
+```
+
+---
+
+### 9. Disaster Recovery & Orphan Reconciler (`clean`)
+
+In the event of unhandled system reboots, abruptly terminated automation runners, or hard-killed processes, orphaned background loggers or stale kernel locks might linger in `STATE_DIR`. The `net-tap clean` command reconciles session health, terminates dead process trees, detaches orphaned `tc clsact` egress drop filters, and purges stale lock files safely:
+
+```bash
+# Reconcile all sessions and purge stale locks system-wide
+sudo net-tap clean
+
+# Target a specific interface for cleanup
+sudo net-tap clean -i eth0
+
+# Target a specific network namespace
+sudo net-tap clean -n prod_vrf -i veth-tap
+```
+
+**What `clean` Does:**
+* Evaluates PID health for every session in `${STATE_DIR}`. Active running sessions are protected.
+* Terminates orphaned `tcpdump`, `dmesg`, or `ip monitor` processes whose parent sessions crashed.
+* Detaches lingering `clsact` Traffic Control egress drop filters to restore interface packet transmission.
+* Verifies non-blocking locks (`flock -x -n`) before unlinking `.lock_*` files, ensuring concurrent sessions are never disrupted.
 
 ---
 
@@ -1070,13 +1129,16 @@ Every active capture session creates a predictable hierarchy of state, telemetry
 
 | Path / Pattern | Creator | Purpose / Contents |
 | :--- | :--- | :--- |
-| `STATE_DIR/net-tap.<iface>.state` | `net-tap on` | Shell key-value state file storing active capture PID, capture directory, ring-buffer parameters, start epoch, and operational mode (`passive` or `active`). |
-| `STATE_DIR/net-tap.<iface>.lock` | `net-tap on` | Interface lock file used to serialize operations and prevent conflicting concurrent tap sessions on the same interface. |
-| `<dir>/<prefix>_<timestamp>_<iface>_<seq>.pcap` | `tcpdump` | Rolling ring-buffer PCAP chunks formatted according to libpcap/pcap-ng standards. |
-| `<dir>/<prefix>_<timestamp>_<iface>_dmesg.log` | Host daemon | Continuous kernel ring buffer diagnostics tracking physical transceiver SFP link-flaps, carrier state changes, and PHY errors (suppressed when running inside network namespaces). |
-| `<dir>/<prefix>_<timestamp>_<iface>_metadata.json` | `net-tap off` | Session metadata containing tap duration, kernel packet counters, interface drop statistics, offload states, and applied BPF filters. |
-| `<dir>/<prefix>_<timestamp>_<iface>_probe_audit.jsonl` | `lib/probe.py` | Real-time JSON Lines audit trail of every transmitted active probe packet, recording timestamp, audit ID, probe type, sequence number, target, VLAN/QinQ tags, source/destination MAC, and protocol metadata. |
-| `<dir>/analysis_report.json` | `net-tap analyze` | RFC 8259 structured JSON document summarizing physical layer health, VLAN segmentation, MACs, dual-stack IP subnets, routing protocols, and active probe correlations. |
+| `${STATE_DIR}/[<netns>__]<iface>.state` | `net-tap on` | Shell serialized state file (`declare -p`) storing active capture PIDs, ring-buffer parameters, start timestamp, original NIC offloads, stealth sysctl states, and operational mode (`passive` or `active`). |
+| `${STATE_DIR}/.lock_<iface>` & `.lock_master` | `net-tap on` | Dynamic non-blocking file locks used to serialize operations and prevent conflicting concurrent tap sessions on the same interface. |
+| `<dir>/<timestamp>_<iface>_<seq>.pcap` (or `.pcap.gz`) | `tcpdump` | Rolling ring-buffer PCAP chunks formatted according to libpcap/pcap-ng standards. |
+| `<dir>/<timestamp>_<iface>_dmesg.log` | Host daemon | Continuous kernel ring buffer diagnostics tracking physical transceiver SFP link-flaps, carrier state changes, and PHY errors (host namespace only). |
+| `<dir>/<timestamp>_<iface>_link_events.log` | Host daemon | Real-time `ip monitor link` log capturing carrier up/down transitions, MTU adjustments, and link operational states. |
+| `<dir>/<timestamp>_<iface>_tcpdump.log` | `tcpdump` | Standard error log capturing `tcpdump` initialization, packet drops at the socket buffer, and filter drop counts. |
+| `<dir>/<timestamp>_<iface>_sfp_ddm.txt` | `net-tap on` | Transceiver Digital Diagnostic Monitoring (DDM) report logging optical power (Rx/Tx dBm), laser bias, voltage, and temperature (SFP mode). |
+| `<dir>/<timestamp>_<iface>_probe_audit.jsonl` | `lib/probe.py` | Real-time JSON Lines audit trail of every transmitted active probe packet, recording timestamp, audit ID, probe type, sequence number, target, VLAN/QinQ tags, source/destination MAC, and protocol metadata. |
+| `<dir>/<timestamp>_merged_trace.pcap` | `mergecap` | Chronologically merged dual-port trace combining bidirectional Tx/Rx feeds (created automatically when `-i <if0>,<if1>` is disarmed). |
+| `stdout` (via `net-tap analyze -j`) | `net-tap analyze` | RFC 8259 structured JSON document summarizing physical layer health, VLAN segmentation, MACs, dual-stack IP subnets, routing protocols, flow top talkers, and active probe correlations. |
 
 ---
 

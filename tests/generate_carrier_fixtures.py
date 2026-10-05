@@ -22,7 +22,7 @@ except ImportError as err:
 packets = []
 
 # 1. IEEE 802.1Q Single Tag & 802.1ad / Legacy QinQ
-packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / Dot1Q(vlan=10) / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=54321, dport=80, flags="S"))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / Dot1Q(vlan=10) / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=54321, dport=80, flags="S", options=[('MSS', 1460), ('WScale', 7), ('SAckOK', b'')]))
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x88a8) / Dot1Q(vlan=100) / Dot1Q(vlan=200) / IP(src="10.200.1.5", dst="10.200.1.1") / TCP(sport=5000, dport=443, flags="SA"))
 # Legacy QinQ (0x9100)
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x9100) / Dot1Q(vlan=300) / Dot1Q(vlan=400) / IP(src="10.200.2.5", dst="10.200.2.1") / TCP(sport=5001, dport=443, flags="A"))
@@ -32,6 +32,9 @@ packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x92
 # 1b. Jumbo Frame with 802.1Q Tag (MTU 9000 envelope)
 jumbo_payload = b"\xaa" * 8900
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / Dot1Q(vlan=500) / IP(src="10.50.0.1", dst="10.50.0.2") / UDP(sport=9999, dport=9999) / Raw(load=jumbo_payload))
+
+# 1c. Provider Backbone Bridge (802.1ah / Mac-in-Mac - 0x88e7)
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x88e7) / Raw(load=b"\x00\x04\x00\x00\x00\x01\x02\x00\x00\x00\x00\x03\x02\x00\x00\x00\x00\x04\x08\x00") / IP(src="10.80.0.1", dst="10.80.0.2") / UDP(sport=8000, dport=8000))
 
 # 2. ARP request & reply
 packets.append(Ether(src="02:00:00:00:00:01", dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, psrc="10.10.1.1", pdst="10.10.1.254", hwsrc="02:00:00:00:00:01"))
@@ -80,9 +83,12 @@ packets.append(Ether(src="02:00:00:00:00:fe", dst="02:00:00:00:00:01") / IPv6(sr
 # 7d. IPv6 Packet Too Big (PTB) - PMTUD (RFC 4443)
 packets.append(Ether(src="02:00:00:00:00:fe", dst="02:00:00:00:00:01") / IPv6(src="fe80::1", dst="2001:db8:beef::100") / ICMPv6PacketTooBig(mtu=1280) / (IPv6(src="2001:db8:beef::100", dst="2001:db8:beef::1") / UDP(sport=5000, dport=5000)))
 
-# 7e. IPv6 Extension Headers (Hop-by-Hop & Fragmentation)
+# 7e. IPv6 Extension Headers (Hop-by-Hop, Fragmentation, ESP, AH)
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::200", dst="2001:db8:beef::1", nh=0) / Raw(load=b"\x11\x00\x01\x04\x00\x00\x00\x00") / UDP(sport=5001, dport=5001) / Raw(load=b"hbh_payload"))
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::201", dst="2001:db8:beef::1", nh=44) / Raw(load=b"\x11\x00\x00\x00\x00\x00\x12\x34") / UDP(sport=5002, dport=5002) / Raw(load=b"frag_payload"))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::202", dst="2001:db8:beef::1", nh=50) / Raw(load=b"\x00\x00\x10\x00\x00\x00\x00\x01\x11\x22\x33\x44\x55\x66\x77\x88"))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::203", dst="2001:db8:beef::1", nh=51) / Raw(load=b"\x3b\x01\x00\x00\x00\x00\x10\x00\x00\x00\x00\x01\x11\x22\x33\x44"))
+
 
 # 8. FHRP: VRRPv3 (IP Proto 112) & HSRP (UDP 1985)
 vrrp_raw = b"\x31\x01\x64\x01\x00\x00\x0a\x0a\x01\x01"
@@ -261,6 +267,11 @@ packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src=
 # 29. HTTP/1.1 Request (Port 80)
 http_get = b"GET /carrier/status HTTP/1.1\r\nHost: api.internal.network\r\nUser-Agent: NetTap-Probe/1.0\r\n\r\n"
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=54321, dport=80, flags="PA") / Raw(load=http_get))
+
+# 30. Malformed frames: Corrupted L4 Checksum & Overlapping Fragments
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254") / TCP(sport=54321, dport=80, flags="PA", chksum=0xdead) / Raw(load=b"corrupted_cksum"))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254", id=0xdead, flags="MF", frag=0) / Raw(load=b"X"*64))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IP(src="10.10.1.1", dst="10.10.1.254", id=0xdead, flags=0, frag=4) / Raw(load=b"Y"*64))
 
 # Ensure monotonic timestamps across packet sequence
 base_time = 1700000000.0

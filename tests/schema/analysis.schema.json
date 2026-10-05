@@ -17,7 +17,8 @@
     "protocols",
     "infrastructure_frames",
     "security_frames",
-    "dpi"
+    "dpi",
+    "top_talkers"
   ],
   "properties": {
     "vlans": {
@@ -104,10 +105,44 @@
     },
     "protocols": {
       "type": "object",
-      "required": ["sctp", "pmtud", "tcp_flags"],
+      "required": ["sctp", "pmtud", "ipv6_extension_headers", "tcp_options", "tcp_flags"],
       "properties": {
         "sctp": { "type": "integer", "minimum": 0 },
         "pmtud": { "type": "integer", "minimum": 0 },
+        "ipv6_extension_headers": {
+          "type": "object",
+          "required": [
+            "hop_by_hop",
+            "routing",
+            "fragment",
+            "esp",
+            "ah"
+          ],
+          "properties": {
+            "hop_by_hop": { "type": "integer", "minimum": 0 },
+            "routing": { "type": "integer", "minimum": 0 },
+            "fragment": { "type": "integer", "minimum": 0 },
+            "esp": { "type": "integer", "minimum": 0 },
+            "ah": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "tcp_options": {
+          "type": "object",
+          "required": [
+            "mss",
+            "wscale",
+            "sack_permitted",
+            "out_of_order"
+          ],
+          "properties": {
+            "mss": { "type": "integer", "minimum": 0 },
+            "wscale": { "type": "integer", "minimum": 0 },
+            "sack_permitted": { "type": "integer", "minimum": 0 },
+            "out_of_order": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
         "tcp_flags": {
           "type": "object",
           "required": [
@@ -172,7 +207,7 @@
         "snmp_community_strings": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string" }
+          "items": { "type": "string", "maxLength": 256 }
         },
         "ospf_routers": {
           "type": "array",
@@ -187,17 +222,60 @@
         "dhcp_hostnames": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string" }
+          "items": { "type": "string", "maxLength": 253 }
         },
         "dns_queries": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string" }
+          "items": { "type": "string", "maxLength": 253 }
         },
         "tls_sni": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string" }
+          "items": { "type": "string", "maxLength": 253 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "top_talkers": {
+      "type": "object",
+      "required": ["ipv4", "ipv6", "flows"],
+      "properties": {
+        "ipv4": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ip", "packets"],
+            "properties": {
+              "ip": { "type": "string", "format": "ipv4" },
+              "packets": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "ipv6": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ip", "packets"],
+            "properties": {
+              "ip": { "type": "string", "format": "ipv6" },
+              "packets": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "flows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["flow", "packets"],
+            "properties": {
+              "flow": { "type": "string" },
+              "packets": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -214,7 +292,7 @@
         "responses_received": { "type": "integer", "minimum": 0 },
         "vlans_probed": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": { "type": "string", "pattern": "^(untagged|[0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5])$" }
         },
         "discovered_hosts": {
           "type": "array",
@@ -230,7 +308,7 @@
                 ]
               },
               "mac": { "type": "string", "pattern": "^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$" },
-              "vlan": { "type": "string" }
+              "vlan": { "type": "string", "pattern": "^(untagged|[0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5])$" }
             },
             "additionalProperties": false
           }

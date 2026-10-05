@@ -143,15 +143,20 @@ analyze_session() {
 
     # Perform consolidated streaming dissection pass with per-packet boundary tracking
     local qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count
+    local ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah
     local tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans
+    local tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order
     local lldp_count cdp_count stp_count vrrp_count hsrp_count eapol_count dhcp_count
     read -r qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count \
+            ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah \
             tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans \
+            tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order \
             lldp_count cdp_count stp_count vrrp_count hsrp_count eapol_count dhcp_count < <(
         awk '
             /^[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
                 in_qinq=0; in_arp=0; in_ndp=0; in_vxlan=0; in_gtp_u=0; in_gtp_c=0; in_geneve=0; in_gre=0; in_6in4=0; in_4in6=0; in_srv6=0; in_sctp=0; in_mpls=0; in_isis=0; in_bfd=0; in_pmtud=0
                 in_lldp=0; in_cdp=0; in_stp=0; in_vrrp=0; in_hsrp=0; in_eapol=0; in_dhcp=0
+                in_hbh=0; in_rtg=0; in_frag=0; in_esp=0; in_ah=0
             }
             /ethertype 802.1Q.*ethertype 802.1Q|0x88a8|0x9100|0x9200|QinQ/ { if (!in_qinq) { qinq++; in_qinq=1 } }
             /ethertype ARP|Request who-has|Reply .* is-at|ARP,/ { if (!in_arp) { arp++; in_arp=1 } }
@@ -173,6 +178,11 @@ analyze_session() {
             /IS-IS|ethertype 0x00fe|dsap OSI \(0xfe\)/ { if (!in_isis) { isis++; in_isis=1 } }
             /(\.|[[:space:]])(3784|4784|3785|7784):|(\.|[[:space:]])(3784|4784|3785|7784) >|BFD/ { if (!in_bfd) { bfd++; in_bfd=1 } }
             /ICMP6, packet too big|need to frag/ { if (!in_pmtud) { pmtud++; in_pmtud=1 } }
+            /next-header (Options|HBH) \(0\)|: HBH/ { if (!in_hbh) { ipv6_hbh++; in_hbh=1 } }
+            /next-header (Routing) \(43\)|: srcrt/ { if (!in_rtg) { ipv6_routing++; in_rtg=1 } }
+            /next-header (Frag|Fragment) \(44\)|: frag \(|fragment header/ { if (!in_frag) { ipv6_frag++; in_frag=1 } }
+            /next-header (ESP) \(50\)|: ESP\(/ { if (!in_esp) { ipv6_esp++; in_esp=1 } }
+            /next-header (AH) \(51\)|: AH\(/ { if (!in_ah) { ipv6_ah++; in_ah=1 } }
             /Flags \[S\]/ { tcp_syn++ }
             /Flags \[S\.\]/ { tcp_synack++ }
             /Flags \[R/ { tcp_rst++ }
@@ -181,6 +191,10 @@ analyze_session() {
             /Flags \[.*U.*\]/ { tcp_urg++ }
             /win 0/ { tcp_zero_win++ }
             /\[tcp retrans\]|retransmission/ { tcp_retrans++ }
+            /mss [0-9]+/ { tcp_mss++ }
+            /wscale [0-9]+/ { tcp_wscale++ }
+            /sackOK/ { tcp_sack_perm++ }
+            /out-of-order|out of order/ { tcp_out_of_order++ }
             /LLDP|0x88cc/ { if (!in_lldp) { lldp++; in_lldp=1 } }
             /CDPv/ { if (!in_cdp) { cdp++; in_cdp=1 } }
             /STP 802.1|802.3.*STP|ethertype.*0x0027/ { if (!in_stp) { stp++; in_stp=1 } }
@@ -190,7 +204,9 @@ analyze_session() {
             /BOOTP\/DHCP|DHCPv6|dhcp6|\.546 >|\.547 >/ { if (!in_dhcp) { dhcp++; in_dhcp=1 } }
             END {
                 print qinq+0, arp+0, ndp+0, ndp_ns+0, ndp_na+0, ndp_rs+0, ndp_ra+0, ndp_redirect+0, vxlan+0, gtp_u+0, gtp_c+0, geneve+0, gre+0, six_in_four+0, four_in_six+0, srv6+0, sctp+0, mpls+0, isis+0, bfd+0, pmtud+0, \
+                      ipv6_hbh+0, ipv6_routing+0, ipv6_frag+0, ipv6_esp+0, ipv6_ah+0, \
                       tcp_syn+0, tcp_synack+0, tcp_rst+0, tcp_fin+0, tcp_psh+0, tcp_urg+0, tcp_zero_win+0, tcp_retrans+0, \
+                      tcp_mss+0, tcp_wscale+0, tcp_sack_perm+0, tcp_out_of_order+0, \
                       lldp+0, cdp+0, stp+0, vrrp+0, hsrp+0, eapol+0, dhcp+0
             }
         ' "${dump_file}"
@@ -428,6 +444,16 @@ analyze_session() {
         echo "  [ -- ] IPv6 RAs: Not observed."
     fi
 
+    # IPv6 Extension Headers
+    echo -e "\n${C_CYAN}IPv6 Extension Headers Observed:${C_RESET}"
+    local v6_ext_total=$((ipv6_hbh + ipv6_routing + ipv6_frag + ipv6_esp + ipv6_ah))
+    if [[ ${v6_ext_total} -gt 0 ]]; then
+        echo -e "  Hop-by-Hop (0) : ${ipv6_hbh} | Routing (43) : ${ipv6_routing} | Fragment (44) : ${ipv6_frag}"
+        echo -e "  IPsec ESP (50) : ${ipv6_esp} | IPsec AH (51) : ${ipv6_ah}"
+    else
+        echo -e "  [ -- ] No IPv6 extension headers observed."
+    fi
+
     # Address Resolution (ARP & NDP)
     echo -e "\n${C_CYAN}Address Resolution Protocol Activity:${C_RESET}"
     echo -e "  IPv4 ARP Resolution Frames  : ${arp_count}"
@@ -492,11 +518,117 @@ analyze_session() {
         echo "  [ -- ] No common overlay tunnels (VXLAN, GTP-U/C, Geneve, GRE, MPLS) observed."
     fi
 
-    # TCP Flag Profiling
-    echo -e "\n${C_CYAN}TCP Connection State Matrix:${C_RESET}"
+    # TCP Flag Profiling & Options
+    echo -e "\n${C_CYAN}TCP Connection State Matrix & Options:${C_RESET}"
     echo -e "  SYN Requests : ${tcp_syn} | SYN-ACK Handshakes : ${tcp_synack} | RST Aborts : ${tcp_rst} | FIN Closes : ${tcp_fin}"
     if [[ "${tcp_psh}" -gt 0 || "${tcp_urg}" -gt 0 || "${tcp_zero_win}" -gt 0 || "${tcp_retrans}" -gt 0 ]]; then
         echo -e "  PSH Flags    : ${tcp_psh} | URG Flags : ${tcp_urg} | Zero-Window Events : ${tcp_zero_win} | Retransmissions : ${tcp_retrans}"
+    fi
+    if [[ "${tcp_mss}" -gt 0 || "${tcp_wscale}" -gt 0 || "${tcp_sack_perm}" -gt 0 || "${tcp_out_of_order}" -gt 0 ]]; then
+        echo -e "  TCP Options  : MSS (${tcp_mss}) | WScale (${tcp_wscale}) | SACK Perm (${tcp_sack_perm}) | Out-of-Order (${tcp_out_of_order})"
+    fi
+
+    # Top Talkers & Flow Matrix Generation
+    python3 -B -c '
+import re, sys, json
+from collections import Counter
+import ipaddress
+
+ipv4_counter = Counter()
+ipv6_counter = Counter()
+flow_counter = Counter()
+
+dump_path = sys.argv[1]
+out_json = sys.argv[2]
+
+def parse_endpoint(ep):
+    ep = ep.strip().rstrip(":,")
+    if "." in ep:
+        last_dot = ep.rfind(".")
+        cand_ip = ep[:last_dot]
+        cand_port = ep[last_dot+1:]
+        if cand_port.isdigit():
+            try:
+                ipaddress.ip_address(cand_ip)
+                return cand_ip, cand_port
+            except ValueError:
+                pass
+    try:
+        ipaddress.ip_address(ep)
+        return ep, None
+    except ValueError:
+        pass
+    return None, None
+
+try:
+    with open(dump_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if " > " not in line:
+                continue
+            cleaned = re.sub(r"^[0-9:.]+ +[0-9a-fA-F:]{17} +> +[0-9a-fA-F:]{17},? *", "", line)
+            cleaned = re.sub(r"\([^)]+\)", "", cleaned)
+            for match in re.finditer(r"([0-9a-fA-F:.]+)\s+>\s+([0-9a-fA-F:.]+)", cleaned):
+                left, right = match.group(1), match.group(2)
+                ip1, p1 = parse_endpoint(left)
+                ip2, p2 = parse_endpoint(right)
+                if ip1 and ip2:
+                    try:
+                        addr1 = ipaddress.ip_address(ip1)
+                        addr2 = ipaddress.ip_address(ip2)
+                        if addr1.version == 4 and addr2.version == 4:
+                            if not (addr1.is_multicast or addr2.is_multicast or addr1.is_loopback or addr2.is_loopback or str(addr1)=="0.0.0.0" or str(addr2)=="255.255.255.255"):
+                                ipv4_counter[str(addr1)] += 1
+                                ipv4_counter[str(addr2)] += 1
+                                f_ep1 = f"{ip1}:{p1}" if p1 else ip1
+                                f_ep2 = f"{ip2}:{p2}" if p2 else ip2
+                                flow = f"{f_ep1} <-> {f_ep2}"
+                                flow_counter[flow] += 1
+                        elif addr1.version == 6 and addr2.version == 6:
+                            if not (addr1.is_multicast or addr2.is_multicast or addr1.is_loopback or addr2.is_loopback or addr1.is_unspecified or addr2.is_unspecified):
+                                ipv6_counter[str(addr1)] += 1
+                                ipv6_counter[str(addr2)] += 1
+                                f_ep1 = f"[{ip1}]:{p1}" if p1 else f"[{ip1}]"
+                                f_ep2 = f"[{ip2}]:{p2}" if p2 else f"[{ip2}]"
+                                flow = f"{f_ep1} <-> {f_ep2}"
+                                flow_counter[flow] += 1
+                    except Exception:
+                        pass
+except Exception:
+    pass
+
+top_v4 = [{"ip": ip, "packets": count} for ip, count in ipv4_counter.most_common(10)]
+top_v6 = [{"ip": ip, "packets": count} for ip, count in ipv6_counter.most_common(10)]
+top_flows = [{"flow": fl, "packets": count} for fl, count in flow_counter.most_common(10)]
+
+result = {
+    "ipv4": top_v4,
+    "ipv6": top_v6,
+    "flows": top_flows
+}
+with open(out_json, "w", encoding="utf-8") as out_f:
+    json.dump(result, out_f, indent=2)
+' "${dump_file}" "${TEMP_DIR}/top_talkers.json" 2>/dev/null || true
+
+    if [[ -f "${TEMP_DIR}/top_talkers.json" ]]; then
+        python3 -B -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    v4 = data.get("ipv4", [])
+    v6 = data.get("ipv6", [])
+    flows = data.get("flows", [])
+    if v4 or v6 or flows:
+        print(f"\n{sys.argv[2]}Top Active Host Talkers & Conversations:{sys.argv[3]}")
+        if v4:
+            print("  Top IPv4 Hosts : " + " | ".join(f"{h[\"ip\"]} ({h[\"packets\"]} pkts)" for h in v4[:5]))
+        if v6:
+            print("  Top IPv6 Hosts : " + " | ".join(f"{h[\"ip\"]} ({h[\"packets\"]} pkts)" for h in v6[:5]))
+        if flows:
+            print("  Top Flows      : " + " | ".join(f"{fl[\"flow\"]} ({fl[\"packets\"]} pkts)" for fl in flows[:3]))
+except Exception:
+    pass
+' "${TEMP_DIR}/top_talkers.json" "${C_CYAN}" "${C_RESET}" 2>/dev/null || true
     fi
 
     # =========================================================================
@@ -739,10 +871,9 @@ analyze_session() {
         python3 -B -c '
 import json, os, re, sys
 
-raw_paths = sys.argv[1].split("\0") if sys.argv[1] else []
-audit_paths = [p for p in raw_paths if p]
-dump_path = sys.argv[2]
-out_json = sys.argv[3]
+dump_path = sys.argv[1]
+out_json = sys.argv[2]
+audit_paths = sys.argv[3:]
 
 audit_files = []
 probes_sent = 0
@@ -859,7 +990,7 @@ result = {
 
 with open(out_json, "w", encoding="utf-8") as out_f:
     json.dump(result, out_f, indent=2)
-' "$(printf "%s\0" "${audit_files[@]}")" "${dump_file}" "${TEMP_DIR}/active_audit.json" 2>/dev/null || true
+' "${dump_file}" "${TEMP_DIR}/active_audit.json" "${audit_files[@]}" 2>/dev/null || true
 
         echo -e "\n${C_BOLD}======================================================================${C_RESET}"
         echo -e "${C_MAGENTA}${C_BOLD} [7] ACTIVE AUDIT & TARGET PROBING CORRELATION${C_RESET}"
@@ -966,6 +1097,19 @@ except Exception:
   "protocols": {
     "sctp": ${sctp_count:-0},
     "pmtud": ${pmtud_count:-0},
+    "ipv6_extension_headers": {
+      "hop_by_hop": ${ipv6_hbh:-0},
+      "routing": ${ipv6_routing:-0},
+      "fragment": ${ipv6_frag:-0},
+      "esp": ${ipv6_esp:-0},
+      "ah": ${ipv6_ah:-0}
+    },
+    "tcp_options": {
+      "mss": ${tcp_mss:-0},
+      "wscale": ${tcp_wscale:-0},
+      "sack_permitted": ${tcp_sack_perm:-0},
+      "out_of_order": ${tcp_out_of_order:-0}
+    },
     "tcp_flags": {
       "syn": ${tcp_syn:-0},
       "syn_ack": ${tcp_synack:-0},
@@ -997,7 +1141,8 @@ except Exception:
     "dhcp_hostnames": $(to_jarr "$dhcp_hosts"),
     "dns_queries": $(to_jarr "$dns_names"),
     "tls_sni": $(to_jarr "$tls_sni")
-  }$(if [[ -f "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
+  },
+  "top_talkers": $(cat "${TEMP_DIR}/top_talkers.json" 2>/dev/null || echo '{"ipv4":[],"ipv6":[],"flows":[]}')$(if [[ -f "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
 }
 EOF
     fi

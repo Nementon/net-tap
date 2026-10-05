@@ -11,14 +11,6 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # Determine the library path (supports local repo, relative install, and FHS system paths)
 if [[ -n "${NET_TAP_LIB_DIR:-}" && -f "${NET_TAP_LIB_DIR}/core.sh" ]]; then
-    if [[ $EUID -eq 0 ]]; then
-        lib_owner=$(stat -c "%u" "${NET_TAP_LIB_DIR}" 2>/dev/null || echo "-1")
-        lib_perm=$(stat -c "%a" "${NET_TAP_LIB_DIR}" 2>/dev/null || echo "777")
-        if [[ "${lib_owner}" -ne 0 ]] || [[ "${lib_perm: -1}" =~ [2367] ]]; then
-            echo "ERROR: Untrusted NET_TAP_LIB_DIR '${NET_TAP_LIB_DIR}' must be owned by root and not writable by other users!" >&2
-            exit 1
-        fi
-    fi
     LIB_DIR="${NET_TAP_LIB_DIR}"
 elif [[ -f "${SCRIPT_DIR}/../lib/core.sh" ]]; then
     LIB_DIR="${SCRIPT_DIR}/../lib"
@@ -31,6 +23,15 @@ elif [[ -f "/usr/lib/net-tap/core.sh" ]]; then
 else
     echo "ERROR: Could not locate net-tap libraries!" >&2
     exit 1
+fi
+
+if [[ $EUID -eq 0 ]]; then
+    lib_owner=$(stat -c "%u" "${LIB_DIR}" 2>/dev/null || echo "-1")
+    lib_perm=$(stat -c "%a" "${LIB_DIR}" 2>/dev/null || echo "777")
+    if [[ "${lib_owner}" -ne 0 && "${lib_owner}" -ne "${SUDO_UID:-0}" ]] || [[ "${lib_perm: -1}" =~ [2367] ]]; then
+        echo "ERROR: Untrusted library directory '${LIB_DIR}' must be owned by root (or invoking user) and not writable by other users!" >&2
+        exit 1
+    fi
 fi
 
 source "${LIB_DIR}/core.sh"
@@ -190,6 +191,10 @@ main() {
                 ;;
             -p|--ports)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                if ! [[ "$2" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+                    log_err "Target ports must be a comma-separated list of positive integers."
+                    exit 1
+                fi
                 PROBE_PORTS="$2"
                 shift 2
                 ;;
@@ -258,6 +263,10 @@ main() {
     if [[ -n "${OUT_DIR}" ]]; then
         if [[ "${OUT_DIR}" =~ ^- ]]; then
             log_err "Output directory cannot start with a hyphen: '${OUT_DIR}'"
+            exit 1
+        fi
+        if [[ -L "${OUT_DIR}" ]]; then
+            log_err "Security violation: Output directory '${OUT_DIR}' cannot be a symlink."
             exit 1
         fi
         OUT_DIR=$(readlink -m "${OUT_DIR}")
@@ -342,10 +351,10 @@ main() {
     fi
 
     if [[ -n "${BPF_FILTER}" ]]; then
-        # If user filter does not already explicitly reference vlan or mpls,
+        # If user filter does not already explicitly reference vlan, 802.1ad, or mpls,
         # expand it so tagged / encapsulated frames are not silently dropped by BPF
-        if ! echo "${BPF_FILTER}" | grep -qiE '\bvlan\b'; then
-            BPF_FILTER="(${BPF_FILTER}) or (vlan and (${BPF_FILTER})) or (vlan and vlan and (${BPF_FILTER}))"
+        if ! echo "${BPF_FILTER}" | grep -qiE '\bvlan\b|0x88a8|0x9100|0x9200'; then
+            BPF_FILTER="(${BPF_FILTER}) or (vlan and (${BPF_FILTER})) or (vlan and vlan and (${BPF_FILTER})) or (ether proto 0x88a8 and (${BPF_FILTER})) or (ether proto 0x9100 and (${BPF_FILTER})) or (ether proto 0x9200 and (${BPF_FILTER}))"
         fi
         if ! echo "${BPF_FILTER}" | grep -qiE '\bmpls\b'; then
             if tcpdump -y EN10MB -d -- "mpls and (${BPF_FILTER})" >/dev/null 2>&1; then

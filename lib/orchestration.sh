@@ -985,20 +985,19 @@ list_sessions() {
         [[ -f "${sfile}" ]] || continue
 
         local s_iface="" s_netns="" s_mode="passive" s_pid="" s_out_dir="" s_ts="" s_bpf=""
-        while IFS='=' read -r key val || [[ -n "$key" ]]; do
-            [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-            key=$(echo "$key" | tr -d '[:space:]')
-            val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
-            case "$key" in
-                IFACE) s_iface="$val" ;;
-                NETNS) s_netns="$val" ;;
-                MODE) s_mode="$val" ;;
-                PID_TCPDUMP) s_pid="$val" ;;
-                OUT_DIR) s_out_dir="$val" ;;
-                TIMESTAMP) s_ts="$val" ;;
-                BPF_FILTER) s_bpf="$val" ;;
-            esac
-        done < "${sfile}"
+        local parsed_info
+        parsed_info=$(
+            (
+                if load_state_file "${sfile}" >/dev/null 2>&1; then
+                    local first_pid="${PIDS_TCPDUMP[0]:-}"
+                    printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\n" \
+                        "${IFACE:-}" "${NETNS:-}" "${MODE:-passive}" "${first_pid}" \
+                        "${OUT_DIR:-}" "${TIMESTAMP:-}" "${BPF_FILTER:-}"
+                fi
+            )
+        )
+        [[ -z "${parsed_info}" ]] && continue
+        IFS=$'\037' read -r s_iface s_netns s_mode s_pid s_out_dir s_ts s_bpf <<< "${parsed_info}"
 
         if [[ -n "${IFACE:-}" && "${IFACE}" != "${s_iface}" ]]; then
             continue
@@ -1075,19 +1074,23 @@ clean_sessions() {
         for sfile in "${STATE_DIR}"/*.state; do
             [[ -f "${sfile}" ]] || continue
 
-            local s_iface="" s_netns="" s_pid="" s_pid_watchdog="" s_pid_autoshutdown=""
-            while IFS='=' read -r key val || [[ -n "$key" ]]; do
-                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-                key=$(echo "$key" | tr -d '[:space:]')
-                val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//')
-                case "$key" in
-                    IFACE) s_iface="$val" ;;
-                    NETNS) s_netns="$val" ;;
-                    PID_TCPDUMP) s_pid="$val" ;;
-                    PID_WATCHDOG) s_pid_watchdog="$val" ;;
-                    PID_AUTOSHUTDOWN) s_pid_autoshutdown="$val" ;;
-                esac
-            done < "${sfile}"
+            local s_iface="" s_netns="" s_pids_str=""
+            local parsed_clean
+            parsed_clean=$(
+                (
+                    if load_state_file "${sfile}" >/dev/null 2>&1; then
+                        local all_pids=()
+                        [[ ${#PIDS_TCPDUMP[@]} -gt 0 ]] && all_pids+=("${PIDS_TCPDUMP[@]}")
+                        [[ ${#PIDS_DMESG[@]} -gt 0 ]] && all_pids+=("${PIDS_DMESG[@]}")
+                        [[ ${#PIDS_IPMON[@]} -gt 0 ]] && all_pids+=("${PIDS_IPMON[@]}")
+                        [[ -n "${PID_WATCHDOG:-}" ]] && all_pids+=("${PID_WATCHDOG}")
+                        [[ -n "${PID_AUTOSHUTDOWN:-}" ]] && all_pids+=("${PID_AUTOSHUTDOWN}")
+                        printf "%s\037%s\037%s\n" "${IFACE:-}" "${NETNS:-}" "${all_pids[*]}"
+                    fi
+                )
+            )
+            [[ -z "${parsed_clean}" ]] && continue
+            IFS=$'\037' read -r s_iface s_netns s_pids_str <<< "${parsed_clean}"
 
             if [[ -n "${IFACE:-}" && "${IFACE}" != "${s_iface}" ]]; then
                 continue
@@ -1098,7 +1101,8 @@ clean_sessions() {
 
             log_info "Cleaning session for interface(s): '${s_iface}' $([[ -n "${s_netns}" ]] && echo "in netns '${s_netns}'")"
 
-            for p in "${s_pid}" "${s_pid_watchdog}" "${s_pid_autoshutdown}"; do
+            read -ra pids_to_kill <<< "${s_pids_str}"
+            for p in "${pids_to_kill[@]}"; do
                 if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
                     if kill -0 "$p" 2>/dev/null; then
                         kill -SIGTERM "$p" 2>/dev/null || true
@@ -1137,10 +1141,16 @@ clean_sessions() {
 
         if [[ -z "${IFACE:-}" ]]; then
             for lk in "${STATE_DIR}"/.lock_* "${STATE_DIR}"/*.lock; do
-                if [[ -f "${lk}" ]]; then
-                    rm -f "${lk}"
-                    cleaned_locks=$((cleaned_locks + 1))
-                fi
+                [[ -f "${lk}" ]] || continue
+                [[ "$(basename "${lk}")" == ".lock_master" ]] && continue
+                (
+                    exec 9>"${lk}"
+                    if flock -x -n 9; then
+                        rm -f "${lk}"
+                    fi
+                    exec 9>&-
+                ) 2>/dev/null || true
+                cleaned_locks=$((cleaned_locks + 1))
             done
         else
             local safe_i="${IFACE//\//_}"
@@ -1148,10 +1158,15 @@ clean_sessions() {
             local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
             [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
             for lk in "${lk_pattern}"*; do
-                if [[ -f "${lk}" ]]; then
-                    rm -f "${lk}"
-                    cleaned_locks=$((cleaned_locks + 1))
-                fi
+                [[ -f "${lk}" ]] || continue
+                (
+                    exec 9>"${lk}"
+                    if flock -x -n 9; then
+                        rm -f "${lk}"
+                    fi
+                    exec 9>&-
+                ) 2>/dev/null || true
+                cleaned_locks=$((cleaned_locks + 1))
             done
         fi
     fi

@@ -352,7 +352,15 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | - | `--dhcp-discover6`, `--dhcp6-discover`| Transmit RFC 8415 DHCPv6 Solicit (IPv6 UDP 546->547) to audit DHCPv6 servers. | None |
 | - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 576-9000B, IPv6: 1280-9000B). | `192.168.1.1` |
 | - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | `192.168.1.1` |
+| - | `--eapol-check` | Audit 802.1X Network Access Control via single EAPOL-Start frame. | None |
+| - | `--snmp-probe` | Probe SNMPv2c sysDescr.0 via single UDP 161 frame. | `192.168.1.1` |
+| - | `--dns-probe` | Probe DNS server version via CHAOS TXT `version.bind` query on UDP 53. | `192.168.1.1` |
+| - | `--nbns-probe` | Probe NetBIOS Name Service Node Status on UDP 137. | `255.255.255.255` |
 | `-p` | `--ports` | Target TCP port list for `--tcp-syn` as comma-separated integers (1-65535, e.g. `22,80,443`). | `22,80,443` |
+| - | `--src-ip` | Custom source IPv4 address for active probes. | Auto / Interface IP |
+| - | `--src-ip6` | Custom source IPv6 address for active probes. | Auto / GUA / LL |
+| - | `--src-mac` | Custom source MAC address for active probes. | Physical MAC |
+| - | `--community` | SNMP community string for `--snmp-probe`. | `public` |
 | - | `--vlan` | Inject probes tagged with IEEE 802.1Q VLAN ID(s) (single `100`, list `10,20`, or range `10-20`). | Untagged |
 | - | `--qinq` | Inject probes double-tagged with 802.1ad QinQ as `s_tag,c_tag` (1-4094, e.g., `100,200`). | None |
 | - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
@@ -526,10 +534,18 @@ sudo net-tap probe -i eth1 --dhcp-discover
 # 6. Measure Path MTU using stepped DF-bit ICMP Echo requests
 sudo net-tap probe -i eth1 --icmp-pmtu 192.168.1.1
 
-# 7. Check specific TCP services with light SYN probes
-sudo net-tap probe -i eth1 --tcp-syn 192.168.1.1 -p 22,80,443,8080
+# 7. Check specific TCP services with light SYN probes and custom source IP
+sudo net-tap probe -i eth1 --tcp-syn 192.168.1.1 --src-ip 192.168.1.253 -p 22,80,443,8080
 
-# 8. Stop capture and correlate responses
+# 8. Audit 802.1X Network Access Control (NAC) on switch port
+sudo net-tap probe -i eth1 --eapol-check
+
+# 9. Query network infrastructure: SNMP sysDescr, DNS version, and NetBIOS
+sudo net-tap probe -i eth1 --snmp-probe 192.168.1.1 --community public
+sudo net-tap probe -i eth1 --dns-probe 192.168.1.1
+sudo net-tap probe -i eth1 --nbns-probe 192.168.1.50
+
+# 10. Stop capture and correlate responses
 sudo net-tap off -i eth1
 net-tap analyze -d /data/lab_audit
 ```
@@ -753,6 +769,50 @@ sequenceDiagram
     Analyzer->>Analyzer: Correlate probe_audit.jsonl + chunk.pcap
     Analyzer-->>Analyzer: Port 443 Confirmed: OPEN (SYN-ACK observed, 0 RSTs leaked)
 ```
+
+---
+
+#### IEEE 802.1X EAPOL-Start Audit (`--eapol-check`)
+
+The `--eapol-check` probe evaluates whether Network Access Control (802.1X / NAC) is enforced on the switch access port.
+
+- **Mechanism**: [`lib/probe.py`](lib/probe.py) synthesizes an IEEE 802.1X EAPOL-Start frame (EtherType `0x888e`) destined to the PAE multicast MAC `01:80:c2:00:00:03`.
+- **Response Handling**: If 802.1X is active, the switch authenticator responds with an `EAP-Request/Identity` frame. If the port is open or uses unauthenticated MAC bypass (MAB), no EAPOL reply will be generated.
+- **Stealth Preservation**: Even if an `EAP-Request` is received, the host OS supplicant cannot leak credentials or unauthenticated responses because un-marked packets are dropped by `tc clsact`.
+
+---
+
+#### Infrastructure Service Fingerprinting (`--snmp-probe`, `--dns-probe`, `--nbns-probe`)
+
+To perform high-fidelity device identification without executing noisy multi-port sweeps, Net-Tap implements single-frame, protocol-specific queries:
+
+1. **SNMP sysDescr Audit (`--snmp-probe <target>`)**:
+   - Transmits a single SNMPv2c `GetRequest` for `sysDescr.0` (`1.3.6.1.2.1.1.1.0`) on UDP 161 with configurable `--community` (default: `public`).
+   - Network switches, routers, firewalls, and embedded appliances immediately return their exact operating system, firmware version, and hardware model in the response.
+
+2. **DNS CHAOS Version Enumeration (`--dns-probe <target>`)**:
+   - Transmits a DNS query for `version.bind` (Class CHAOS, Type TXT) on UDP 53.
+   - Authoritative and recursive DNS servers return their implementation version string (e.g. BIND, Unbound, CoreDNS).
+
+3. **NetBIOS Name Service Node Status (`--nbns-probe <target>`)**:
+   - Transmits an RFC 1002 Node Status query for `*` on UDP 137 (unicast or broadcast `255.255.255.255`).
+   - Responding Windows, Linux/Samba, and NAS hosts disclose their NetBIOS computer name, active workgroup/domain, and network adapter MAC address.
+
+---
+
+#### Source Identity Overrides & Pre-Flight Neighbor Resolution
+
+To prevent silent kernel drops caused by Martian source addresses (RFC 3704 Reverse Path Filtering / `rp_filter`) or asymmetric return routing:
+
+1. **Source IP Resolution Hierarchy (`resolve_source_ip`)**:
+   - If `--src-ip <ip>` is explicitly supplied, it is used directly.
+   - If the interface has an assigned IPv4 address (`ip -4 addr show`), that IP is used.
+   - If probing an unnumbered tap, Net-Tap derives a plausible on-subnet host address (e.g. `.253` or `.2`) within the target's subnet, preventing target hosts from directing return packets away to default gateways.
+2. **Pre-Flight Destination MAC Resolution (`resolve_dst_mac`)**:
+   - Prior to transmitting unicast Layer 4 or PMTU probes, Net-Tap checks the kernel neighbor cache (`/proc/net/arp` and `ip neigh`).
+   - If the target MAC is unpopulated, Net-Tap dynamically emits a single pre-flight ARP request (or ICMPv6 Neighbor Solicitation) stamped with `SO_MARK 0x7a9`, awaiting the reply before transmitting L4 traffic. This avoids falling back to link-layer broadcast `ff:ff:ff:ff:ff:ff` (which RFC 1122 and Linux kernel `ip_input.c` drop for unicast transport protocols).
+3. **Source MAC Cloning (`--src-mac <mac>`)**:
+   - Allows operators to clone passively observed client MAC addresses to bypass switchport sticky-MAC limits or 802.1X quarantine.
 
 ---
 

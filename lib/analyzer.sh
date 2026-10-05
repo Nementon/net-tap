@@ -980,6 +980,50 @@ if os.path.exists(dump_path):
                             discovered_hosts_dict[key] = tgt_mac
                 continue
 
+            if "eapol_start" in probed_types or "eapol" in probed_types:
+                if "EAP" in line or "eapol" in line.lower() or "0x888e" in line:
+                    responses_received += 1
+                    continue
+
+            if "snmp" in probed_types:
+                if ".161 >" in line or "snmp" in line.lower() or "GetResponse" in line:
+                    responses_received += 1
+                    snmp_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.161\s+>", line)
+                    if snmp_m:
+                        s_ip = snmp_m.group(1)
+                        mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line) or re.search(r">\s+([0-9a-fA-F:]{17})", line)
+                        if mac_m and (not probed_ips or s_ip in probed_ips):
+                            key = (s_ip, pkt_vlan)
+                            if key not in discovered_hosts_dict:
+                                discovered_hosts_dict[key] = mac_m.group(1).lower()
+                    continue
+
+            if "dns" in probed_types:
+                if ".53 >" in line or "domain >" in line or "version.bind" in line:
+                    responses_received += 1
+                    dns_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.53\s+>", line)
+                    if dns_m:
+                        d_ip = dns_m.group(1)
+                        mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line) or re.search(r">\s+([0-9a-fA-F:]{17})", line)
+                        if mac_m and (not probed_ips or d_ip in probed_ips):
+                            key = (d_ip, pkt_vlan)
+                            if key not in discovered_hosts_dict:
+                                discovered_hosts_dict[key] = mac_m.group(1).lower()
+                    continue
+
+            if "nbns" in probed_types:
+                if ".137 >" in line or "netbios-ns >" in line or "NBSTAT" in line:
+                    responses_received += 1
+                    nb_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.137\s+>", line)
+                    if nb_m:
+                        n_ip = nb_m.group(1)
+                        mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line) or re.search(r">\s+([0-9a-fA-F:]{17})", line)
+                        if mac_m and (not probed_ips or n_ip in probed_ips):
+                            key = (n_ip, pkt_vlan)
+                            if key not in discovered_hosts_dict:
+                                discovered_hosts_dict[key] = mac_m.group(1).lower()
+                    continue
+
 discovered_hosts = [
     {"ip": ip, "mac": mac, "vlan": vlan}
     for (ip, vlan), mac in sorted(discovered_hosts_dict.items())

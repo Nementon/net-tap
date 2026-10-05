@@ -18,7 +18,7 @@ run_probe() {
     fi
 
     if [[ -z "${PROBE_TYPE:-}" ]]; then
-        log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --dhcp-discover6, --icmp-pmtu, --tcp-syn)."
+        log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --dhcp-discover6, --icmp-pmtu, --tcp-syn, --eapol-check, --snmp-probe, --dns-probe, --nbns-probe)."
         exit 1
     fi
 
@@ -94,6 +94,10 @@ run_probe() {
     [[ -n "${PROBE_PORTS:-}" ]] && cmd+=(--ports "${PROBE_PORTS}")
     [[ -n "${probe_vlans}" ]] && cmd+=(--vlans "${probe_vlans}")
     [[ -n "${PROBE_QINQ:-}" ]] && cmd+=(--qinq "${PROBE_QINQ}")
+    [[ -n "${PROBE_SRC_IP:-}" ]] && cmd+=(--src-ip "${PROBE_SRC_IP}")
+    [[ -n "${PROBE_SRC_IP6:-}" ]] && cmd+=(--src-ip6 "${PROBE_SRC_IP6}")
+    [[ -n "${PROBE_SRC_MAC:-}" ]] && cmd+=(--src-mac "${PROBE_SRC_MAC}")
+    [[ -n "${PROBE_COMMUNITY:-}" ]] && cmd+=(--community "${PROBE_COMMUNITY}")
 
     log_info "Launching ${PROBE_TYPE^^} probe on ${IFACE} (rate: ${PROBE_RATE:-50} pps)..."
     cmd_netns "${cmd[@]}"

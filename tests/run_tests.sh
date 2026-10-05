@@ -238,6 +238,8 @@ assert_fail "QinQ tags must be in format 's_tag,c_tag'" "$BIN_PATH" probe -i lo 
 assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "5000,100"
 assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "100,5000"
 assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "0,100"
+assert_fail "Invalid source IPv4 address format" "$BIN_PATH" probe -i lo --arp-scan --src-ip "notanip"
+assert_fail "Invalid source MAC address format" "$BIN_PATH" probe -i lo --arp-scan --src-mac "notamac"
 
 TMP_SYM_DIR=$(mktemp -d /tmp/net-tap-symtest.XXXXXX)
 ln -s "${TMP_SYM_DIR}" "${TMP_SYM_DIR}_link"
@@ -1277,11 +1279,19 @@ def process_pkt(pkt):
         reply = Ether(src='02:00:00:88:99:bb', dst=pkt[Ether].src) / IPv6(src='2001:db8::1', dst=pkt[IPv6].src) / ICMPv6ND_NA(tgt='2001:db8::1', R=1, S=1, O=1)
     elif pkt.haslayer(ICMPv6EchoRequest):
         reply = Ether(src='02:00:00:88:99:bb', dst=pkt[Ether].src) / IPv6(src=pkt[IPv6].dst, dst=pkt[IPv6].src) / Raw(load=b'pong')
+    elif getattr(pkt, 'type', None) == 0x888e:
+        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src, type=0x888e) / Raw(load=b'\x01\x00\x00\x09\x01\x01\x00\x09\x01')
+    elif pkt.haslayer(UDP) and pkt[UDP].dport == 161:
+        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src=pkt[IP].dst, dst=pkt[IP].src) / UDP(sport=161, dport=pkt[UDP].sport) / Raw(load=b'snmp-response')
+    elif pkt.haslayer(UDP) and pkt[UDP].dport == 53:
+        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src=pkt[IP].dst, dst=pkt[IP].src) / UDP(sport=53, dport=pkt[UDP].sport) / Raw(load=b'dns-response')
+    elif pkt.haslayer(UDP) and pkt[UDP].dport == 137:
+        reply = Ether(src='02:00:00:88:99:aa', dst=pkt[Ether].src) / IP(src='192.0.2.99', dst=pkt[IP].src) / UDP(sport=137, dport=pkt[UDP].sport) / Raw(load=b'nbns-response')
 
     if reply is not None:
         sendp(reply, iface='veth-peer', count=1, verbose=0)
 
-sniff(iface='veth-peer', timeout=10, prn=process_pkt)
+sniff(iface='veth-peer', timeout=15, prn=process_pkt)
 " &
     RESP_PID=$!
     sleep 0.4
@@ -1300,6 +1310,11 @@ sniff(iface='veth-peer', timeout=10, prn=process_pkt)
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --dhcp-discover6
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --icmp-pmtu 2001:db8::1
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --tcp-syn 2001:db8::1 -p 80,443
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --eapol-check
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --snmp-probe 192.0.2.99 --community public
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --dns-probe 192.0.2.99
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --nbns-probe 192.0.2.99
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --tcp-syn 192.0.2.99 --src-ip 192.0.2.10 -p 80
 
     kill "${RESP_PID}" 2>/dev/null || true
     wait "${RESP_PID}" 2>/dev/null || true

@@ -77,6 +77,10 @@ main() {
     PROBE_RATE=50
     PROBE_TIMEOUT=5
     PROBE_AUDIT_ID=""
+    PROBE_SRC_IP=""
+    PROBE_SRC_IP6=""
+    PROBE_SRC_MAC=""
+    PROBE_COMMUNITY="public"
 
     SCRIPT_PATH=$(readlink -f "$0")
 
@@ -188,6 +192,57 @@ main() {
                 else
                     shift
                 fi
+                ;;
+            --eapol-check|--eapol-probe)
+                PROBE_TYPE="eapol"
+                shift
+                ;;
+            --snmp-probe)
+                PROBE_TYPE="snmp"
+                if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
+                    PROBE_TARGET="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --dns-probe)
+                PROBE_TYPE="dns"
+                if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
+                    PROBE_TARGET="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --nbns-probe)
+                PROBE_TYPE="nbns"
+                if [[ $# -ge 2 ]] && [[ "$2" != -* ]]; then
+                    PROBE_TARGET="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            --src-ip)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_SRC_IP="$2"
+                shift 2
+                ;;
+            --src-ip6)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_SRC_IP6="$2"
+                shift 2
+                ;;
+            --src-mac)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_SRC_MAC="$2"
+                shift 2
+                ;;
+            --community)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                PROBE_COMMUNITY="$2"
+                shift 2
                 ;;
             -p|--ports)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
@@ -301,8 +356,20 @@ main() {
             exit 1
         fi
         if [[ -z "${PROBE_TYPE}" ]]; then
-            log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --dhcp-discover6, --icmp-pmtu, --tcp-syn)."
+            log_err "A probe type must be specified (e.g., --arp-scan, --ndp-scan, --dhcp-discover, --dhcp-discover6, --icmp-pmtu, --tcp-syn, --eapol-check, --snmp-probe, --dns-probe, --nbns-probe)."
             exit 1
+        fi
+        if [[ -n "${PROBE_SRC_IP}" ]]; then
+            if ! [[ "${PROBE_SRC_IP}" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                log_err "Invalid source IPv4 address format: '${PROBE_SRC_IP}'."
+                exit 1
+            fi
+        fi
+        if [[ -n "${PROBE_SRC_MAC}" ]]; then
+            if ! [[ "${PROBE_SRC_MAC}" =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]]; then
+                log_err "Invalid source MAC address format: '${PROBE_SRC_MAC}' (expected aa:bb:cc:dd:ee:ff)."
+                exit 1
+            fi
         fi
         if ! [[ "${PROBE_RATE}" =~ ^[1-9][0-9]*$ ]]; then
             log_err "Probe rate must be a positive integer."

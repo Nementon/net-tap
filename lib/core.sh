@@ -379,7 +379,15 @@ Probe Options (for 'probe' command):
   --dhcp-discover6          Transmit RFC 8415 DHCPv6 Solicit (IPv6).
   --icmp-pmtu <target>      Measure Path MTU using stepped DF-bit ICMP Echo requests.
   --tcp-syn <target>        Probe TCP port availability using single SYN packets.
+  --eapol-check             Audit 802.1X Network Access Control via EAPOL-Start frame.
+  --snmp-probe <target>     Probe SNMPv2c sysDescr.0 via single UDP 161 frame.
+  --dns-probe <target>      Probe DNS server version via CHAOS TXT version.bind query.
+  --nbns-probe <target>     Probe NetBIOS Name Service Node Status on UDP 137.
   -p, --ports <ports>       Target port list for TCP probe (e.g., 22,80,443; default: 22,80,443).
+  --src-ip <ip>             Custom source IPv4 address for active probes.
+  --src-ip6 <ipv6>          Custom source IPv6 address for active probes.
+  --src-mac <mac>           Custom source MAC address for active probes.
+  --community <str>         SNMP community string (default: public).
   --vlan <vid>              Inject probes with IEEE 802.1Q VLAN tag(s) (e.g. 100, 10-20, or 10,20,100-105).
   --qinq <s-tag,c-tag>      Inject probes with double-tagged QinQ headers (e.g., 100,200).
   --auto-vlans              Automatically probe across all VLANs passively observed on link.
@@ -394,6 +402,11 @@ Examples:
   sudo $0 probe -i eth1 --vlan 100 --arp-scan 10.100.1.0/24
   sudo $0 probe -i eth1 --auto-vlans --arp-scan 10.0.0.0/24
   sudo $0 probe -i eth1 --dhcp-discover
+  sudo $0 probe -i eth1 --eapol-check
+  sudo $0 probe -i eth1 --snmp-probe 192.168.1.1
+  sudo $0 probe -i eth1 --dns-probe 192.168.1.1
+  sudo $0 probe -i eth1 --nbns-probe 192.168.1.50
+  sudo $0 probe -i eth1 --tcp-syn 192.168.1.50 --src-ip 192.168.1.253 -p 80,443
   $0 status -i eth1
   sudo $0 off -i eth1
   $0 analyze -d /data/trace

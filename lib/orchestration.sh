@@ -411,6 +411,11 @@ start_tap() {
         ORIG_IPV4_MC_FWD[$iface]=$(cmd_netns sysctl -n "net.ipv4.conf.${iface}.mc_forwarding" 2>/dev/null || echo "0")
         ORIG_IPV4_BC_FWD[$iface]=$(cmd_netns sysctl -n "net.ipv4.conf.${iface}.bc_forwarding" 2>/dev/null || echo "0")
 
+        # Ensure kernel retains IPv6 addresses when link goes down (RFC 4862 SLAAC preservation)
+        if cmd_netns test -d "/proc/sys/net/ipv6/conf/${iface}"; then
+            cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.keep_addr_on_down=1" 2>/dev/null || true
+        fi
+
         # 2. Down interface first to eliminate temporal emission windows during reconfiguration
         cmd_netns ip link set dev "${iface}" down 2>/dev/null || true
         cmd_netns ip link set dev "${iface}" txqueuelen 0 2>/dev/null || true
@@ -422,7 +427,6 @@ start_tap() {
 
         # Non-destructive stealth: Suppress spontaneous ICMPv6/MLD/ARP emissions without wiping IPv6 addresses
         if cmd_netns test -d "/proc/sys/net/ipv6/conf/${iface}"; then
-            cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.keep_addr_on_down=1" 2>/dev/null || true
             cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.addr_gen_mode=1" 2>/dev/null || true
             cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.router_solicitations=0" 2>/dev/null || true
             cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.accept_dad=0" 2>/dev/null || true
@@ -632,20 +636,20 @@ start_tap() {
     SCRIPT_PATH="${SCRIPT_PATH:-$(readlink -f "$0")}"
     if [[ -n "${DURATION}" ]] && [[ "${DURATION}" =~ ^[0-9]+$ ]]; then
         log_info "Scheduling auto-shutdown in ${DURATION} seconds..."
-        _autoshutdown_worker "${DURATION}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" >/dev/null 2>&1 9>&- &
+        ( for fd in {3..20}; do eval "exec ${fd}>&-" 2>/dev/null; done; _autoshutdown_worker "${DURATION}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" ) >/dev/null 2>&1 &
         PID_AUTOSHUTDOWN=$!
     fi
 
     local THRESH="${DISK_THRESH:-85}"
     log_info "Starting background disk watchdog (threshold: ${THRESH}%)..."
-    _disk_watchdog_worker "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" >/dev/null 2>&1 9>&- &
+    ( for fd in {3..20}; do eval "exec ${fd}>&-" 2>/dev/null; done; _disk_watchdog_worker "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" ) >/dev/null 2>&1 &
     PID_WATCHDOG=$!
 
     # 8. Secure atomic state serialization
     tmp_state=$(mktemp "${STATE_DIR}/.state.XXXXXX")
     chmod 644 "${tmp_state}"
     {
-        declare -p IFACE MODE HW_TYPE TIMESTAMP NETNS ROTATE_SIZE ROTATE_COUNT OUT_DIR
+        declare -p IFACE MODE HW_TYPE TIMESTAMP NETNS ROTATE_SIZE ROTATE_COUNT OUT_DIR BPF_FILTER
         declare -p PIDS_TCPDUMP PIDS_DMESG PIDS_IPMON PCAP_FILES DMESG_LOGS LINK_LOGS TCPDUMP_ERRS CONFIGURED_IFACES
         declare -p ORIG_PROMISC ORIG_ARP ORIG_IPV6_DISABLE ORIG_IPV6_KEEP_ADDR ORIG_IPV6_ADDR_GEN ORIG_IPV6_DAD ORIG_IPV6_DADT ORIG_IPV6_RA ORIG_IPV6_RS ORIG_IPV6_AUTOCONF ORIG_IPV6_TEMP ORIG_IPV6_EDAD ORIG_IPV6_NDISC ORIG_IPV6_REDIR
         declare -p ORIG_MLDV1_INTVAL ORIG_MLDV2_INTVAL ORIG_MLD_VER ORIG_DROP_UNA ORIG_ACCEPT_UNA ORIG_IPV6_FWD ORIG_IPV6_MC_FWD
@@ -736,6 +740,7 @@ stop_tap() {
     IFS=',' read -ra IFACES_ARR <<< "${IFACE}"
 
     cleanup_on_interrupt() {
+        trap - EXIT INT TERM HUP
         log_err "Received interrupt signal! Forcing emergency interface reset..."
         for iface in "${IFACES_ARR[@]}"; do
             restore_interface_state "${iface}"
@@ -855,10 +860,12 @@ stop_tap() {
         if [[ -n "${avail_kb}" && "${avail_kb}" -gt "${req_kb}" ]]; then
             log_info "Merging ${#all_pcaps[@]} PCAP files into ${merged_file}..."
             mergecap -w "${merged_file}" "${all_pcaps[@]}" 2>/dev/null || true
-            if [[ -f "${merged_file}" ]]; then
+            if [[ -s "${merged_file}" ]]; then
                 merge_msg="(Merged into ${merged_file})"
                 TOTAL_SIZE=$(du -sh "${merged_file}" | awk '{print $1}')
                 FILE_COUNT=1
+            else
+                rm -f "${merged_file}" 2>/dev/null || true
             fi
         else
             log_warn "Insufficient disk space to safely merge PCAPs (Required: $((req_kb/1024))MB, Available: $((avail_kb/1024))MB). Keeping separate chunks."
@@ -1104,71 +1111,85 @@ clean_sessions() {
             read -ra pids_to_kill <<< "${s_pids_str}"
             for p in "${pids_to_kill[@]}"; do
                 if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
-                    if kill -0 "$p" 2>/dev/null; then
-                        kill -SIGTERM "$p" 2>/dev/null || true
-                        sleep 0.05
-                        kill -9 "$p" 2>/dev/null || true
-                    fi
+                    safe_kill "$p" "tcpdump|dmesg|ip|bash|net-tap|net-tap.sh"
                 fi
             done
 
-            IFS=',' read -ra if_arr <<< "${s_iface}"
-            for dev in "${if_arr[@]}"; do
-                if [[ -n "${s_netns}" ]]; then
-                    ip netns exec "${s_netns}" tc qdisc del dev "${dev}" clsact 2>/dev/null || true
-                    ip netns exec "${s_netns}" iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
-                    ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
-                    ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
-                    ip netns exec "${s_netns}" ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
-                    ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
-                    ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
-                    ip netns exec "${s_netns}" ip link set "${dev}" down 2>/dev/null || true
-                else
-                    tc qdisc del dev "${dev}" clsact 2>/dev/null || true
-                    iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
-                    iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
-                    iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
-                    ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
-                    ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
-                    ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
-                    ip link set "${dev}" down 2>/dev/null || true
-                fi
-            done
+            # Load state file if possible to restore original sysctl, MTU, and offload configurations
+            if load_state_file "${sfile}" 2>/dev/null; then
+                NETNS="${s_netns}"
+                IFS=',' read -ra if_arr <<< "${s_iface}"
+                for dev in "${if_arr[@]}"; do
+                    restore_interface_state "${dev}"
+                    cmd_netns tc qdisc del dev "${dev}" clsact 2>/dev/null || true
+                    cmd_netns iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                    cmd_netns iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                    cmd_netns iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                    cmd_netns ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                    cmd_netns ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                    cmd_netns ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                done
+            else
+                IFS=',' read -ra if_arr <<< "${s_iface}"
+                for dev in "${if_arr[@]}"; do
+                    if [[ -n "${s_netns}" ]]; then
+                        ip netns exec "${s_netns}" tc qdisc del dev "${dev}" clsact 2>/dev/null || true
+                        ip netns exec "${s_netns}" iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                        ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                        ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        ip netns exec "${s_netns}" ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                        ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                        ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        ip netns exec "${s_netns}" ip link set "${dev}" down 2>/dev/null || true
+                    else
+                        tc qdisc del dev "${dev}" clsact 2>/dev/null || true
+                        iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                        iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                        iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
+                        ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
+                        ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        ip link set "${dev}" down 2>/dev/null || true
+                    fi
+                done
+            fi
 
             rm -f "${sfile}"
             cleaned_sessions=$((cleaned_sessions + 1))
         done
 
-        if [[ -z "${IFACE:-}" ]]; then
-            for lk in "${STATE_DIR}"/.lock_* "${STATE_DIR}"/*.lock; do
-                [[ -f "${lk}" ]] || continue
-                [[ "$(basename "${lk}")" == ".lock_master" ]] && continue
-                (
-                    exec 9>"${lk}"
-                    if flock -x -n 9; then
-                        rm -f "${lk}"
+        {
+            exec 8>"${STATE_DIR}/.lock_master"
+            flock -x 8 2>/dev/null || true
+
+            if [[ -z "${IFACE:-}" ]]; then
+                for lk in "${STATE_DIR}"/.lock_* "${STATE_DIR}"/*.lock; do
+                    [[ -f "${lk}" ]] || continue
+                    [[ "$(basename "${lk}")" == ".lock_master" ]] && continue
+                    if (
+                        exec 9>"${lk}"
+                        flock -x -n 9 && rm -f "${lk}"
+                    ) 2>/dev/null; then
+                        cleaned_locks=$((cleaned_locks + 1))
                     fi
-                    exec 9>&-
-                ) 2>/dev/null || true
-                cleaned_locks=$((cleaned_locks + 1))
-            done
-        else
-            local safe_i="${IFACE//\//_}"
-            local safe_n="${NETNS//\//_}"
-            local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
-            [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
-            for lk in "${lk_pattern}"*; do
-                [[ -f "${lk}" ]] || continue
-                (
-                    exec 9>"${lk}"
-                    if flock -x -n 9; then
-                        rm -f "${lk}"
+                done
+            else
+                local safe_i="${IFACE//\//_}"
+                local safe_n="${NETNS//\//_}"
+                local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
+                [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
+                for lk in "${lk_pattern}"*; do
+                    [[ -f "${lk}" ]] || continue
+                    if (
+                        exec 9>"${lk}"
+                        flock -x -n 9 && rm -f "${lk}"
+                    ) 2>/dev/null; then
+                        cleaned_locks=$((cleaned_locks + 1))
                     fi
-                    exec 9>&-
-                ) 2>/dev/null || true
-                cleaned_locks=$((cleaned_locks + 1))
-            done
-        fi
+                done
+            fi
+            exec 8>&-
+        } 2>/dev/null || true
     fi
 
     log_ok "Cleanup complete: ${cleaned_sessions} session(s) detached, ${cleaned_locks} lock file(s) purged."

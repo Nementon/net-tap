@@ -43,7 +43,7 @@ _syslog() {
     shift
     if command -v logger >/dev/null 2>&1; then
         local clean_msg
-        clean_msg=$(printf "%s" "$*" | sed -r 's/\x1B\[[0-9;]*[mK]//g')
+        clean_msg=$(printf "%s" "$*" | sed -E 's/\x1B\[[0-9;]*[mK]//g')
         logger -t net-tap "[${level}] ${clean_msg}" || true
     fi
 }
@@ -68,7 +68,7 @@ log_err()   {
 # --- Carrier-Grade Verifications ---
 verify_dependencies() {
     local missing=()
-    for cmd in ip tc tcpdump ethtool awk dmesg grep sed find ss df du mktemp readlink gzip flock sysctl stat date; do
+    for cmd in ip tc tcpdump ethtool awk dmesg grep sed find ss df du mktemp readlink gzip flock sysctl stat date python3; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             missing+=("$cmd")
         fi
@@ -85,7 +85,10 @@ verify_disk_space() {
     local req_mb=$((ROTATE_SIZE * ROTATE_COUNT * count))
     local avail_mb
     
-    mkdir -p "${target_dir}"
+    if ! mkdir -p "${target_dir}" 2>/dev/null; then
+        log_err "Cannot create output directory '${target_dir}' (read-only filesystem or permission denied)."
+        exit 1
+    fi
     avail_mb=$(df -Pm "${target_dir}" 2>/dev/null | awk 'NR==2 {print $4}')
     
     if [[ -z "${avail_mb}" ]] || [[ "${avail_mb}" -lt "${req_mb}" ]]; then
@@ -146,7 +149,7 @@ load_state_file() {
     fi
     local file_owner perm
     file_owner=$(stat -c "%u" "${sfile}" 2>/dev/null || echo "-1")
-    if [[ "${file_owner}" -ne 0 && "${file_owner}" -ne "${EUID}" ]]; then
+    if [[ "${EUID}" -ne 0 && "${file_owner}" -ne "${EUID}" ]]; then
         log_err "Security violation: State file '${sfile}' is not owned by root (UID 0) or current user."
         return 1
     fi
@@ -171,7 +174,7 @@ load_state_file() {
         log_err "Security violation: State file '${sfile}' contains forbidden expansion characters."
         return 1
     fi
-    local allowed_vars="IFACE|MODE|HW_TYPE|TIMESTAMP|NETNS|ROTATE_SIZE|ROTATE_COUNT|OUT_DIR|PIDS_TCPDUMP|PIDS_DMESG|PIDS_IPMON|PCAP_FILES|DMESG_LOGS|LINK_LOGS|TCPDUMP_ERRS|CONFIGURED_IFACES|ORIG_[A-Za-z0-9_]+|PID_WATCHDOG|PID_AUTOSHUTDOWN"
+    local allowed_vars="IFACE|MODE|HW_TYPE|TIMESTAMP|NETNS|ROTATE_SIZE|ROTATE_COUNT|OUT_DIR|BPF_FILTER|PIDS_TCPDUMP|PIDS_DMESG|PIDS_IPMON|PCAP_FILES|DMESG_LOGS|LINK_LOGS|TCPDUMP_ERRS|CONFIGURED_IFACES|ORIG_[A-Za-z0-9_]+|PID_WATCHDOG|PID_AUTOSHUTDOWN"
     # shellcheck disable=SC2016
     if echo "${scontent}" | grep -qvE '^(#.*|[[:space:]]*|declare (--|-a|-A) ('"${allowed_vars}"')(=([0-9]+|"[^"$`\\]*"|\([][a-zA-Z0-9_./@:+=, "-]*\)))?)$'; then
         log_err "Security violation: State file '${sfile}' contains unauthorized expressions."

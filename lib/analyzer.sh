@@ -711,7 +711,7 @@ except Exception:
     # =========================================================================
     local snmp_strings="" ospf_routers="" bgp_asns="" dhcp_hosts="" dns_names="" tls_sni=""
 
-    if command -v tshark >/dev/null 2>&1; then
+    if [[ "${NET_TAP_DISABLE_TSHARK:-0}" -ne 1 ]] && command -v tshark >/dev/null 2>&1; then
         echo -e "\n${C_BOLD}======================================================================${C_RESET}"
         echo -e "${C_MAGENTA}${C_BOLD} [6] DEEP PROTOCOL INSPECTION (L4-L7 via TSHARK)${C_RESET}"
         echo -e "${C_BOLD}======================================================================${C_RESET}"
@@ -830,7 +830,7 @@ except Exception:
                 sc=$(tcpdump -r "${pf}" -s 0 -A "udp port 161" 2>/dev/null | tr -d '\000-\010\013\014\016-\037' | grep -oE "public|private|[a-zA-Z0-9_]{3,32}" | grep -vE '^(IP|GetRequest|GetNextRequest|SetRequest|SNMP|udp)$' | sort -u || true)
             fi
             if [[ -n "${sc}" ]]; then
-                snmp_strings=$(echo -e "${snmp_strings}\n${sc}" | grep -v '^$' | sort -u || true)
+                snmp_strings=$(printf "%s\n%s\n" "${snmp_strings}" "${sc}" | grep -v '^$' | sort -u || true)
             fi
         done
         if [[ -n "${snmp_strings}" ]]; then
@@ -850,7 +850,7 @@ except Exception:
                 sni=$(tcpdump -r "${pf}" -s 0 -A "tcp port 443" 2>/dev/null | grep -oE "[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z0-9\.]+" | grep -E "\.(com|net|org|io|internal|corp|edu|gov)$" | sort -u || true)
             fi
             if [[ -n "${sni}" ]]; then
-                tls_sni=$(echo -e "${tls_sni}\n${sni}" | grep -v '^$' | sort -u | head -n 15 || true)
+                tls_sni=$(printf "%s\n%s\n" "${tls_sni}" "${sni}" | grep -v '^$' | sort -u | head -n 15 || true)
             fi
         done
         if [[ -n "${tls_sni}" ]]; then
@@ -900,7 +900,12 @@ for p in audit_paths:
                         probed_ips.add(str(target))
                     v = record.get("vlan")
                     if v is not None:
-                        vlans_probed_set.add(str(v))
+                        try:
+                            v_int = int(v)
+                            if 1 <= v_int <= 4094:
+                                vlans_probed_set.add(str(v_int))
+                        except (ValueError, TypeError):
+                            pass
                     else:
                         vlans_probed_set.add("untagged")
                 except Exception:
@@ -966,10 +971,10 @@ if os.path.exists(dump_path):
                 mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>", line)
                 if not mac_m:
                     mac_m = re.search(r">\s+([0-9a-fA-F:]{17})", line)
-                if tgt_m:
+                if tgt_m and mac_m:
                     tgt_ip = tgt_m.group(1).lower()
+                    tgt_mac = mac_m.group(1).lower()
                     if not probed_ips or tgt_ip in probed_ips:
-                        tgt_mac = mac_m.group(1).lower() if mac_m else "unknown"
                         key = (tgt_ip, pkt_vlan)
                         if key not in discovered_hosts_dict:
                             discovered_hosts_dict[key] = tgt_mac

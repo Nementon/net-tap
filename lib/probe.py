@@ -21,6 +21,7 @@ import os
 import random
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -83,39 +84,60 @@ def get_link_local_ipv6(iface: str) -> str:
 
 
 def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool) -> str:
-    """Resolve destination MAC for target IP using kernel neighbor cache with fallback."""
+    """Resolve destination MAC for target IP using kernel neighbor cache with RFC 2464/1112 fallback."""
     try:
-        if is_v6:
-            if target_ip.lower().startswith("ff"):
-                return "33:33:00:00:00:01"
-            with os.popen(f"ip -6 neigh show dev {iface} {target_ip} 2>/dev/null") as p:
-                for line in p.read().splitlines():
-                    parts = line.split()
-                    if "lladdr" in parts:
-                        idx = parts.index("lladdr")
-                        if idx + 1 < len(parts):
-                            return parts[idx + 1]
-            tgt_obj = ipaddress.IPv6Address(target_ip)
+        try:
+            tgt_obj = ipaddress.ip_address(target_ip)
+        except ValueError:
+            return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
+
+        if is_v6 and isinstance(tgt_obj, ipaddress.IPv6Address):
+            if tgt_obj.is_multicast:
+                # RFC 2464 Section 7: Ethernet MAC for IPv6 multicast is 33:33 + last 32 bits of IPv6 address
+                last4 = tgt_obj.packed[-4:]
+                return f"33:33:{last4[0]:02x}:{last4[1]:02x}:{last4[2]:02x}:{last4[3]:02x}"
+
+            # Query kernel neighbor cache safely using argument list
+            res = subprocess.run(["ip", "-6", "neigh", "show", "dev", iface, str(tgt_obj)],
+                                 capture_output=True, text=True, check=False)
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if "lladdr" in parts:
+                    idx = parts.index("lladdr")
+                    if idx + 1 < len(parts):
+                        return parts[idx + 1]
+
+            # Solicited-Node Multicast fallback (RFC 4291)
             last_24 = tgt_obj.exploded[-7:].replace(":", "")
             return f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
-        else:
-            if target_ip == "255.255.255.255":
+        elif not is_v6 and isinstance(tgt_obj, ipaddress.IPv4Address):
+            if str(tgt_obj) == "255.255.255.255":
                 return "ff:ff:ff:ff:ff:ff"
+            if tgt_obj.is_multicast:
+                # RFC 1112: 01:00:5e: + lower 23 bits of IPv4 address
+                octets = tgt_obj.packed
+                mac_b = bytes([0x01, 0x00, 0x5e, octets[1] & 0x7f, octets[2], octets[3]])
+                return ':'.join(f'{b:02x}' for b in mac_b)
+
             if os.path.exists("/proc/net/arp"):
                 with open("/proc/net/arp", "r") as f:
                     for line in f:
                         parts = line.split()
-                        if len(parts) >= 6 and parts[0] == target_ip and parts[5] == iface:
+                        if len(parts) >= 6 and parts[0] == str(tgt_obj) and parts[5] == iface:
                             if parts[3] != "00:00:00:00:00:00":
                                 return parts[3]
-            with os.popen(f"ip -4 neigh show dev {iface} {target_ip} 2>/dev/null") as p:
-                for line in p.read().splitlines():
-                    parts = line.split()
-                    if "lladdr" in parts:
-                        idx = parts.index("lladdr")
-                        if idx + 1 < len(parts):
-                            return parts[idx + 1]
+
+            res = subprocess.run(["ip", "-4", "neigh", "show", "dev", iface, str(tgt_obj)],
+                                 capture_output=True, text=True, check=False)
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if "lladdr" in parts:
+                    idx = parts.index("lladdr")
+                    if idx + 1 < len(parts):
+                        return parts[idx + 1]
             return "ff:ff:ff:ff:ff:ff"
+        else:
+            return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
     except Exception:
         return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
 
@@ -277,7 +299,11 @@ def main():
                     seq += 1
                     arp_req = ARP(op=1, hwsrc=src_mac, psrc=src_ip, pdst=str(host))
                     pkt = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
-                    sock.send(bytes(pkt))
+                    try:
+                        sock.send(bytes(pkt))
+                    except OSError as err:
+                        sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
+                        break
                     log_audit(audit_f, audit_id, "arp", str(host), vid, args.qinq, src_mac, "ff:ff:ff:ff:ff:ff", seq)
                     packet_count += 1
                     if packet_count % 50 == 0:
@@ -314,12 +340,13 @@ def main():
                     seq += 1
                     tgt_str = str(tgt)
                     if tgt_str == "ff02::2":
-                        rs = IPv6(src=src_ll, dst="ff02::2", fl=PROBE_FWMARK) / ICMPv6ND_RS() / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
+                        # RFC 4861 Sections 6.1.1 / 7.1.1: Hop Limit MUST be 255
+                        rs = IPv6(src=src_ll, dst="ff02::2", fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_RS() / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                         pkt = wrap_l2(rs, dst_mac="33:33:00:00:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
                         dst_mac = "33:33:00:00:00:02"
                         ptype = "ndp_rs"
                     elif tgt_str == "ff02::1":
-                        echo = IPv6(src=src_ll, dst="ff02::1", fl=PROBE_FWMARK) / ICMPv6EchoRequest(id=PROBE_FWMARK, seq=seq)
+                        echo = IPv6(src=src_ll, dst="ff02::1", fl=PROBE_FWMARK, hlim=255) / ICMPv6EchoRequest(id=PROBE_FWMARK, seq=seq)
                         pkt = wrap_l2(echo, dst_mac="33:33:00:00:00:01", src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
                         dst_mac = "33:33:00:00:00:01"
                         ptype = "ndp_echo"
@@ -327,7 +354,8 @@ def main():
                         last_24 = tgt.exploded[-7:].replace(":", "")
                         sn_mcast_ip = f"ff02::1:ff{last_24[:2]}:{last_24[2:]}"
                         sn_mcast_mac = f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
-                        ns = IPv6(src=src_ll, dst=sn_mcast_ip, fl=PROBE_FWMARK) / ICMPv6ND_NS(tgt=tgt_str) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
+                        # RFC 4861 Sections 6.1.1 / 7.1.1: Hop Limit MUST be 255
+                        ns = IPv6(src=src_ll, dst=sn_mcast_ip, fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_NS(tgt=tgt_str) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                         pkt = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
                         dst_mac = sn_mcast_mac
                         ptype = "ndp_ns"
@@ -392,7 +420,7 @@ def main():
                     dst_mac = resolve_dst_mac(iface, target_ip, True)
                 else:
                     target_ip = args.target or "192.168.1.1"
-                    sizes = [1500, 2000, 4000, 9000]
+                    sizes = [576, 1280, 1420, 1450, 1492, 1500, 2000, 4000, 9000]
                     dst_mac = resolve_dst_mac(iface, target_ip, False)
 
                 for sz in sizes:
@@ -400,12 +428,12 @@ def main():
                         break
                     seq += 1
                     if is_v6:
-                        header_len = 14 + (4 if vid else 0) + (8 if qinq_tuple else 0) + 40 + 8
-                        payload_len = max(0, sz - header_len)
+                        # RFC 8200 IPv6 header is 40 bytes; ICMPv6 Echo is 8 bytes
+                        payload_len = max(0, sz - 40 - 8)
                         echo_pkt = IPv6(src=src_ll, dst=target_ip, fl=PROBE_FWMARK) / ICMPv6EchoRequest(id=PROBE_FWMARK, seq=seq, data=b"X" * payload_len)
                     else:
-                        header_len = 14 + (4 if vid else 0) + (8 if qinq_tuple else 0) + 20 + 8
-                        payload_len = max(0, sz - header_len)
+                        # RFC 791 IPv4 header is 20 bytes; ICMP Echo is 8 bytes
+                        payload_len = max(0, sz - 20 - 8)
                         echo_pkt = IP(src="192.0.2.2", dst=target_ip, id=PROBE_FWMARK, flags="DF") / ICMP(type=8, id=PROBE_FWMARK, seq=seq) / Raw(b"X" * payload_len)
 
                     pkt = wrap_l2(echo_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple)
@@ -417,7 +445,7 @@ def main():
                     except OSError as err:
                         if getattr(err, "errno", None) in (errno.EMSGSIZE, 90):
                             log_audit(audit_f, audit_id, "pmtu", target_ip, vid, args.qinq, src_mac, dst_mac, seq,
-                                      {"probed_mtu": sz, "payload_len": payload_len, "ip_version": 6 if is_v6 else 4, "status": "local_mtu_exceeded"})
+                                       {"probed_mtu": sz, "payload_len": payload_len, "ip_version": 6 if is_v6 else 4, "status": "local_mtu_exceeded"})
                         else:
                             sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
                             break

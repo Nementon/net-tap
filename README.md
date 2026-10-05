@@ -318,7 +318,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | :--- | :--- | :--- | :--- |
 | `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (e.g. `eth1` or `sfp0,sfp1`). | None |
 | `-m` | `--mode` | Operational mode: `passive` (strict zero-egress stealth) or `active` (permits explicitly marked audit probes via `net-tap probe` while continuing to drop unsolicited OS emissions). | `passive` |
-| `-o` | `--output-dir` | Target directory for PCAP traces and optical/link logs. | `./captures` |
+| `-o`, `-d` | `--output-dir`, `--dir` | Target directory for PCAP traces and optical/link logs. Preflight requires $\ge \text{rotate-size} \times \text{rotate-count} \times N_{\text{interfaces}}$ MB free disk space. | `./captures` |
 | `-t` | `--type` | Hardware type: `ethernet` or `sfp`. | `ethernet` |
 | `-s` | `--speed` | Force link speed in Mbps for SFP transceivers (e.g. `1000`, `10000`). | Auto |
 | `-n` | `--netns` | Target Linux network namespace (`ip netns`). | Host namespace |
@@ -332,7 +332,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 #### Options for `net-tap off`
 | Flag | Long Option | Description | Default |
 | :--- | :--- | :--- | :--- |
-| `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (must match interfaces provided to `on`). | None |
+| `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (or any constituent interface of an active multi-port session). | None |
 | `-n` | `--netns` | Target Linux network namespace (auto-discovered from tap state if omitted). | Auto |
 
 #### Options for `net-tap status`
@@ -346,15 +346,15 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | :--- | :--- | :--- | :--- |
 | `-i` | `--interface` | **(Required)** Target single network interface (must have active session with `--mode active`). | None |
 | `-n` | `--netns` | Target Linux network namespace (auto-discovered if omitted). | Host namespace |
-| - | `--arp-scan` | Scan IPv4 subnet or host via ARP requests (e.g., `--arp-scan 192.168.1.0/24`). | None |
+| - | `--arp-scan` | Scan IPv4 subnet or host via ARP requests (e.g., `--arp-scan 192.168.1.0/24`; max allowed prefix is `/16` / 65,536 hosts). | `192.168.1.0/24` |
 | - | `--ndp-scan` | Scan IPv6 prefix, host, all-routers (`ff02::2`), or all-nodes (`ff02::1`) via ICMPv6 NS/RS/Echo. | `ff02::2` |
 | - | `--dhcp-discover`| Broadcast RFC 2131 DHCP Discover (IPv4) to audit DHCP servers. | None |
-| - | `--dhcp-discover6`| Transmit RFC 8415 DHCPv6 Solicit (IPv6 UDP 546->547) to audit DHCPv6 servers. | None |
-| - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 1500-9000B, IPv6: 1280-9000B). | None |
-| - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | None |
-| `-p` | `--ports` | Target TCP port list for `--tcp-syn` (e.g., `22,80,443`). | `22,80,443` |
+| - | `--dhcp-discover6`, `--dhcp6-discover`| Transmit RFC 8415 DHCPv6 Solicit (IPv6 UDP 546->547) to audit DHCPv6 servers. | None |
+| - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 576-9000B, IPv6: 1280-9000B). | `192.168.1.1` |
+| - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | `192.168.1.1` |
+| `-p` | `--ports` | Target TCP port list for `--tcp-syn` as comma-separated integers (1-65535, e.g. `22,80,443`). | `22,80,443` |
 | - | `--vlan` | Inject probes tagged with IEEE 802.1Q VLAN ID(s) (single `100`, list `10,20`, or range `10-20`). | Untagged |
-| - | `--qinq` | Inject probes double-tagged with 802.1ad QinQ as `s_tag,c_tag` (e.g., `100,200`). | None |
+| - | `--qinq` | Inject probes double-tagged with 802.1ad QinQ as `s_tag,c_tag` (1-4094, e.g., `100,200`). | None |
 | - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
 | - | `--rate` | Maximum probe transmission rate in packets per second. | `50` |
 | - | `--timeout` | Maximum probe duration timeout in seconds. | `5` |
@@ -452,6 +452,7 @@ Port Status for eth1:
   NIC Counters  : rx_dropped: 0, rx_missed_errors: 0
 
 Active Tap Engine Session:
+  Mode              : passive
   Session Started   : 2026-10-04_14-30-00
   tcpdump Status    : RUNNING (PIDs: 12345)
   Capture Files     : 4 files (4 files, 382M total)
@@ -936,9 +937,15 @@ Network Tunnels & Overlay Encapsulation:
   [FOUND] BFD Fault Detection: 1 frame(s) observed.
   [WARN] Path MTU Discovery (PTB/Frag Needed): 1 frame(s) observed.
 
-TCP Connection State Matrix:
+TCP Connection State Matrix & Options:
   SYN Requests : 42 | SYN-ACK Handshakes : 40 | RST Aborts : 2 | FIN Closes : 38
   PSH Flags    : 40 | URG Flags : 0 | Zero-Window Events : 2 | Retransmissions : 0
+  TCP Options  : MSS (40) | WScale (38) | SACK Perm (40) | Out-of-Order (0)
+
+Top Active Host Talkers & Conversations:
+  Top IPv4 Hosts : 10.0.10.50 (84 pkts) | 10.0.10.1 (80 pkts)
+  Top IPv6 Hosts : 2001:db8:beef::10 (12 pkts) | 2001:db8:beef::100 (12 pkts)
+  Top Flows      : 10.0.10.50:54321 <-> 10.0.10.1:443 (80 pkts)
 
 ======================================================================
  [4] INFRASTRUCTURE PROTOCOLS (LLDP, CDP, STP, FHRP)
@@ -1063,6 +1070,19 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
   "protocols": {
     "sctp": 1,
     "pmtud": 1,
+    "ipv6_extension_headers": {
+      "hop_by_hop": 0,
+      "routing": 0,
+      "fragment": 0,
+      "esp": 0,
+      "ah": 0
+    },
+    "tcp_options": {
+      "mss": 40,
+      "wscale": 38,
+      "sack_permitted": 40,
+      "out_of_order": 0
+    },
     "tcp_flags": {
       "syn": 42,
       "syn_ack": 40,
@@ -1094,6 +1114,34 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     "dhcp_hostnames": ["srv-dc01"],
     "dns_queries": ["srv-dc01.corp.local", "api.internal.network"],
     "tls_sni": ["login.microsoftonline.com", "telemetry.internal.network"]
+  },
+  "top_talkers": {
+    "ipv4": [
+      {
+        "ip": "10.0.10.50",
+        "packets": 84
+      },
+      {
+        "ip": "10.0.10.1",
+        "packets": 80
+      }
+    ],
+    "ipv6": [
+      {
+        "ip": "2001:db8:beef::10",
+        "packets": 12
+      },
+      {
+        "ip": "2001:db8:beef::100",
+        "packets": 12
+      }
+    ],
+    "flows": [
+      {
+        "flow": "10.0.10.50:54321 <-> 10.0.10.1:443",
+        "packets": 80
+      }
+    ]
   },
   "active_audit": {
     "audit_files": ["20261004_143000_eth1_probe_audit.jsonl"],
@@ -1138,7 +1186,7 @@ Every active capture session creates a predictable hierarchy of state, telemetry
 | `<dir>/<timestamp>_<iface>_sfp_ddm.txt` | `net-tap on` | Transceiver Digital Diagnostic Monitoring (DDM) report logging optical power (Rx/Tx dBm), laser bias, voltage, and temperature (SFP mode). |
 | `<dir>/<timestamp>_<iface>_probe_audit.jsonl` | `lib/probe.py` | Real-time JSON Lines audit trail of every transmitted active probe packet, recording timestamp, audit ID, probe type, sequence number, target, VLAN/QinQ tags, source/destination MAC, and protocol metadata. |
 | `<dir>/<timestamp>_merged_trace.pcap` | `mergecap` | Chronologically merged dual-port trace combining bidirectional Tx/Rx feeds (created automatically when `-i <if0>,<if1>` is disarmed). |
-| `stdout` (via `net-tap analyze -j`) | `net-tap analyze` | RFC 8259 structured JSON document summarizing physical layer health, VLAN segmentation, MACs, dual-stack IP subnets, routing protocols, flow top talkers, and active probe correlations. |
+| `stdout` (via `net-tap analyze -j`) | `net-tap analyze` | RFC 8259 structured JSON document summarizing VLAN segmentation, MACs, dual-stack IP subnets, routing protocols, flow top talkers, and active probe correlations. |
 
 ---
 

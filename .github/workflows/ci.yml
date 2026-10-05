@@ -41,6 +41,7 @@ jobs:
             tshark \
             iptables \
             procps \
+            wpa_supplicant \
             python3-scapy \
             python3-jsonschema
 

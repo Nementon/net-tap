@@ -28,7 +28,7 @@ fi
 if [[ $EUID -eq 0 ]]; then
     lib_owner=$(stat -c "%u" "${LIB_DIR}" 2>/dev/null || echo "-1")
     lib_perm=$(stat -c "%a" "${LIB_DIR}" 2>/dev/null || echo "777")
-    if [[ "${lib_owner}" -ne 0 && "${lib_owner}" -ne "${SUDO_UID:-0}" ]] || [[ "${lib_perm: -1}" =~ [2367] ]]; then
+    if [[ "${lib_owner}" -ne 0 && "${lib_owner}" -ne "${SUDO_UID:-0}" && "${lib_owner}" -ne "${EUID}" ]] || [[ "${lib_perm: -1}" =~ [2367] ]]; then
         echo "ERROR: Untrusted library directory '${LIB_DIR}' must be owned by root (or invoking user) and not writable by other users!" >&2
         exit 1
     fi
@@ -344,23 +344,39 @@ main() {
             done
             PROBE_VLAN=$(printf "%s\n" "${expanded_vlans[@]}" | sort -n -u | paste -sd, -)
         fi
-        if [[ -n "${PROBE_QINQ}" ]] && ! [[ "${PROBE_QINQ}" =~ ^[0-9]+,[0-9]+$ ]]; then
-            log_err "QinQ tags must be in format 's_tag,c_tag' (e.g., 100,200)."
-            exit 1
+        if [[ -n "${PROBE_QINQ}" ]]; then
+            if ! [[ "${PROBE_QINQ}" =~ ^[0-9]+,[0-9]+$ ]]; then
+                log_err "QinQ tags must be in format 's_tag,c_tag' (e.g., 100,200)."
+                exit 1
+            fi
+            local q_s="${PROBE_QINQ%%,*}" q_c="${PROBE_QINQ##*,}"
+            if [[ "$q_s" -lt 1 || "$q_s" -gt 4094 || "$q_c" -lt 1 || "$q_c" -gt 4094 ]]; then
+                log_err "QinQ tags must be integers between 1 and 4094 (got ${q_s},${q_c})."
+                exit 1
+            fi
         fi
     fi
 
     if [[ -n "${BPF_FILTER}" ]]; then
-        # If user filter does not already explicitly reference vlan, 802.1ad, or mpls,
-        # expand it so tagged / encapsulated frames are not silently dropped by BPF
-        if ! echo "${BPF_FILTER}" | grep -qiE '\bvlan\b|0x88a8|0x9100|0x9200'; then
-            BPF_FILTER="(${BPF_FILTER}) or (vlan and (${BPF_FILTER})) or (vlan and vlan and (${BPF_FILTER})) or (ether proto 0x88a8 and (${BPF_FILTER})) or (ether proto 0x9100 and (${BPF_FILTER})) or (ether proto 0x9200 and (${BPF_FILTER}))"
+        local base_filter="${BPF_FILTER}"
+        local expanded_clauses=("(${base_filter})")
+        if ! echo "${base_filter}" | grep -qiE '\bvlan\b|0x88a8|0x9100|0x9200'; then
+            expanded_clauses+=(
+                "(vlan and (${base_filter}))"
+                "(vlan and vlan and (${base_filter}))"
+                "(ether proto 0x88a8 and (${base_filter}))"
+                "(ether proto 0x9100 and (${base_filter}))"
+                "(ether proto 0x9200 and (${base_filter}))"
+            )
         fi
-        if ! echo "${BPF_FILTER}" | grep -qiE '\bmpls\b'; then
-            if tcpdump -y EN10MB -d -- "mpls and (${BPF_FILTER})" >/dev/null 2>&1; then
-                BPF_FILTER="(${BPF_FILTER}) or (mpls and (${BPF_FILTER}))"
+        if ! echo "${base_filter}" | grep -qiE '\bmpls\b'; then
+            if tcpdump -y EN10MB -d -- "mpls and (${base_filter})" >/dev/null 2>&1; then
+                expanded_clauses+=("(mpls and (${base_filter}))")
             fi
         fi
+        local IFS=" "
+        BPF_FILTER=$(printf "%s or " "${expanded_clauses[@]}")
+        BPF_FILTER="${BPF_FILTER% or }"
     fi
 
     local safe_iface="${IFACE//\//_}"
@@ -414,8 +430,10 @@ main() {
                             exit 1
                         fi
                         STATE_FILE="$f"
-                        # Update IFACE to the full multi-interface list so stop/status affects the whole session
-                        IFACE="$ifaces_part"
+                        # Update IFACE to full multi-interface list for stop/status, but preserve single target for probe
+                        if [[ "${ACTION}" != "probe" ]]; then
+                            IFACE="$ifaces_part"
+                        fi
                         if [[ -z "${safe_netns}" && -n "${parsed_netns}" ]]; then
                             NETNS="${parsed_netns}"
                             safe_netns="${parsed_netns}"

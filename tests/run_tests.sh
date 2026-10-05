@@ -235,6 +235,14 @@ assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i
 assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan "badvlan"
 assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan "10-20-30"
 assert_fail "QinQ tags must be in format 's_tag,c_tag'" "$BIN_PATH" probe -i lo --arp-scan --qinq "badqinq"
+assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "5000,100"
+assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "100,5000"
+assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "0,100"
+
+TMP_SYM_DIR=$(mktemp -d /tmp/net-tap-symtest.XXXXXX)
+ln -s "${TMP_SYM_DIR}" "${TMP_SYM_DIR}_link"
+assert_fail "cannot be a symlink" "$BIN_PATH" on -i lo -o "${TMP_SYM_DIR}_link"
+rm -rf "${TMP_SYM_DIR}" "${TMP_SYM_DIR}_link"
 
 # --- 3. Privilege Checks ---
 if [[ $EUID -ne 0 ]]; then
@@ -824,7 +832,7 @@ with open('${TEST_TRUNC_DIR}/trunc.pcap', 'wb') as f:
 
         # Verify Native tcpdump DPI Fallback (when tshark is absent or bypassed)
         echo -n "[TEST] Validating native tcpdump DPI fallback (tshark absent)... "
-        DPI_FALLBACK_JSON=$(PATH="/bin:/usr/local/bin" "$BIN_PATH" analyze -d "$FIXTURES_DIR" --json 2>/dev/null)
+        DPI_FALLBACK_JSON=$(NET_TAP_DISABLE_TSHARK=1 "$BIN_PATH" analyze -d "$FIXTURES_DIR" --json 2>/dev/null)
         if echo "${DPI_FALLBACK_JSON}" | jq -e '
             (.dpi.ospf_routers | index("10.255.255.1") != null) and
             (.dpi.bgp_asns | index("65001") != null) and
@@ -841,7 +849,8 @@ with open('${TEST_TRUNC_DIR}/trunc.pcap', 'wb') as f:
             FAILED=$((FAILED + 1))
         fi
     else
-        echo "[WARNING] jq not installed, skipping JSON validations."
+        echo "[ERROR] jq is required to validate DPI fallback JSON output!" >&2
+        FAILED=$((FAILED + 1))
     fi
 fi
 

@@ -3,7 +3,9 @@ captures/
 *.pcap
 !tests/fixtures/*.pcap
 *.log
+!tests/fixtures/*.log
 *_sfp_ddm.txt
+!tests/fixtures/*_sfp_ddm.txt
 
 # State files (if created locally instead of /var/run)
 *.state

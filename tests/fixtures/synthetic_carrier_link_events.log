@@ -1,0 +1,2 @@
+[2026-10-05T12:00:00.123456+00:00] 2: sfp0: <BROADCAST,MULTICAST,PROMISC> mtu 9000 qdisc noqueue state UP group default
+[2026-10-05T12:01:00.654321+00:00] 2: sfp0: <BROADCAST,MULTICAST,PROMISC> mtu 9000 qdisc noqueue state UP group default

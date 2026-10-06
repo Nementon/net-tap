@@ -41,16 +41,34 @@ fi
 
 _early_resolve_path() {
     local target="$1"
+    local res=""
     if command -v realpath >/dev/null 2>&1; then
-        realpath "${target}"
-    elif command -v greadlink >/dev/null 2>&1; then
-        greadlink -f "${target}"
-    elif readlink -f "${target}" >/dev/null 2>&1; then
-        readlink -f "${target}"
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${target}"
-    else
+        if res=$(realpath "${target}" 2>/dev/null) && [[ -n "${res}" ]]; then
+            echo "${res}"
+            return 0
+        fi
+    fi
+    if command -v greadlink >/dev/null 2>&1; then
+        if res=$(greadlink -m "${target}" 2>/dev/null || greadlink -f "${target}" 2>/dev/null) && [[ -n "${res}" ]]; then
+            echo "${res}"
+            return 0
+        fi
+    elif command -v readlink >/dev/null 2>&1 && [[ "$(uname -s 2>/dev/null)" != "Darwin"* ]]; then
+        if res=$(readlink -m "${target}" 2>/dev/null || readlink -f "${target}" 2>/dev/null) && [[ -n "${res}" ]]; then
+            echo "${res}"
+            return 0
+        fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        if res=$(python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${target}" 2>/dev/null) && [[ -n "${res}" ]]; then
+            echo "${res}"
+            return 0
+        fi
+    fi
+    if [[ "${target}" = /* ]]; then
         echo "${target}"
+    else
+        echo "${PWD}/${target#./}"
     fi
 }
 

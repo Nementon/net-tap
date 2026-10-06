@@ -129,7 +129,7 @@ restore_interface_state() {
 
 # --- Background Worker Functions (Prevents subshell crashes under set -e) ---
 _autoshutdown_worker() {
-    local dur="$1" ifc="$2" ns="${3:-}" script="${4:-$(readlink -f "$0")}" stfile="$5"
+    local dur="$1" ifc="$2" ns="${3:-}" script="${4:-$(resolve_path "$0")}" stfile="$5"
     local sleep_pid=""
     trap '[[ -n "${sleep_pid}" ]] && kill -TERM "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT HUP EXIT
     local fd_dir="/dev/fd"
@@ -154,7 +154,7 @@ _autoshutdown_worker() {
 }
 
 _disk_watchdog_worker() {
-    local thresh="$1" outdir="$2" ifc="$3" ns="${4:-}" script="${5:-$(readlink -f "$0")}" stfile="$6" rot_count="${7:-10}" capture_pids="${8:-}" session_ts="${9:-}"
+    local thresh="$1" outdir="$2" ifc="$3" ns="${4:-}" script="${5:-$(resolve_path "$0")}" stfile="$6" rot_count="${7:-10}" capture_pids="${8:-}" session_ts="${9:-}"
     local sleep_pid=""
     trap '[[ -n "${sleep_pid}" ]] && kill -TERM "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT EXIT
     trap '' HUP

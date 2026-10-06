@@ -34,6 +34,12 @@ lint:
 	@if command -v python3 >/dev/null 2>&1; then \
 		python3 -B -c "import ast; [ast.parse(open(f).read()) for f in ['tests/generate_carrier_fixtures.py', 'lib/probe.py', 'tests/test_probe_unit.py']]" && echo "Python syntax passed!"; \
 	fi
+	@if command -v ruff >/dev/null 2>&1; then \
+		ruff check lib/probe.py tests/*.py && echo "Ruff check passed!"; \
+	fi
+	@if command -v mypy >/dev/null 2>&1; then \
+		mypy --ignore-missing-imports lib/probe.py && echo "Mypy type check passed!"; \
+	fi
 	@echo "Validating Draft-7 analysis JSON schema..."
 	@if command -v python3 >/dev/null 2>&1; then \
 		python3 -B -c "import json, jsonschema; s = json.load(open('tests/schema/analysis.schema.json')); jsonschema.Draft7Validator.check_schema(s); print('Schema valid!')"; \
@@ -61,7 +67,7 @@ test-integration: lint fixtures
 	@$(SUDO) PYTHONDONTWRITEBYTECODE=1 bash tests/run_tests.sh
 
 clean:
-	@rm -rf lib/__pycache__ tests/__pycache__ /tmp/pmtud.pcap
-	@find /tmp -maxdepth 1 -user "$$(id -u)" -name "net-tap-*" -exec rm -rf {} + 2>/dev/null || true
+	@rm -rf lib/__pycache__ tests/__pycache__
+	@find /tmp -maxdepth 1 -user "$$(id -u)" \( -name "net-tap-*" -o -name "net_tap_*" -o -name "wpa_*" \) -exec rm -rf {} + 2>/dev/null || true
 
 .PHONY: all install installcheck uninstall lint fixtures test test-integration clean

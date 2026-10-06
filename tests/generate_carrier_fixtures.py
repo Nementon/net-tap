@@ -337,7 +337,35 @@ for idx, pkt in enumerate(packets):
 
 # Resolve output path dynamically
 script_dir = os.path.dirname(os.path.abspath(__file__))
-output_file = os.path.join(script_dir, "fixtures", "synthetic_carrier_trace.pcap")
-os.makedirs(os.path.dirname(output_file), exist_ok=True)
+fixtures_dir = os.path.join(script_dir, "fixtures")
+os.makedirs(fixtures_dir, exist_ok=True)
+
+output_file = os.path.join(fixtures_dir, "synthetic_carrier_trace.pcap")
 wrpcap(output_file, packets)
 print(f"Successfully generated {len(packets)} carrier frames in {output_file}")
+
+# Generate matching SFP optical diagnostics fixture
+ddm_file = os.path.join(fixtures_dir, "synthetic_carrier_sfp_ddm.txt")
+ddm_content = """        Identifier                               : 0x03 (SFP)
+        Extended identifier                      : 0x04 (GBIC/SFP defined by 2-wire interface ID)
+        Connector                                : 0x07 (LC)
+        Transceiver optical diagnostics:
+        Module temperature                       : 33.42 degrees C / 92.16 degrees F
+        Module voltage                           : 3.2914 V
+        Laser bias current                       : 5.612 mA
+        Laser output power                       : 0.6582 mW / -1.82 dBm
+        Receiver signal average optical power    : 0.5821 mW / -2.35 dBm
+"""
+with open(ddm_file, "w", encoding="utf-8") as df:
+    df.write(ddm_content)
+print(f"Generated synthetic optical diagnostics fixture in {ddm_file}")
+
+# Generate matching link events log fixture
+link_log_file = os.path.join(fixtures_dir, "synthetic_carrier_link_events.log")
+link_content = """[2026-10-05T12:00:00.123456+00:00] 2: sfp0: <BROADCAST,MULTICAST,PROMISC> mtu 9000 qdisc noqueue state UP group default
+[2026-10-05T12:01:00.654321+00:00] 2: sfp0: <BROADCAST,MULTICAST,PROMISC> mtu 9000 qdisc noqueue state UP group default
+"""
+with open(link_log_file, "w", encoding="utf-8") as lf:
+    lf.write(link_content)
+print(f"Generated synthetic link events fixture in {link_log_file}")
+

@@ -141,6 +141,70 @@ analyze_session() {
         fi
     fi
 
+    if [[ ${#ddm_files[@]} -gt 0 || ${#link_logs[@]} -gt 0 ]]; then
+        python3 -B -c '
+import json, re, sys
+
+out_file = sys.argv[1]
+flaps = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 0
+ddm_files = sys.argv[3:]
+
+res = {"link_flaps": flaps}
+if ddm_files:
+    ddm_res = {
+        "rx_power_dbm": None,
+        "tx_power_dbm": None,
+        "tx_bias_ma": None,
+        "temperature_c": None,
+        "voltage_v": None
+    }
+    for df in ddm_files:
+        try:
+            with open(df, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                rx_m = re.search(r"(?:Receiver signal average optical power|Optical receive power)[^:]*:\s*[-0-9.]+\s*mW\s*/\s*([-0-9.]+)\s*dBm", content, re.I) or re.search(r"(?:Receiver signal average optical power|Optical receive power)[^:]*:\s*([-0-9.]+)\s*dBm", content, re.I)
+                if rx_m and ddm_res["rx_power_dbm"] is None:
+                    try:
+                        ddm_res["rx_power_dbm"] = float(rx_m.group(1))
+                    except ValueError:
+                        pass
+
+                tx_m = re.search(r"Laser output power[^:]*:\s*[-0-9.]+\s*mW\s*/\s*([-0-9.]+)\s*dBm", content, re.I) or re.search(r"Laser output power[^:]*:\s*([-0-9.]+)\s*dBm", content, re.I)
+                if tx_m and ddm_res["tx_power_dbm"] is None:
+                    try:
+                        ddm_res["tx_power_dbm"] = float(tx_m.group(1))
+                    except ValueError:
+                        pass
+
+                bias_m = re.search(r"Laser bias current[^:]*:\s*([-0-9.]+)\s*mA", content, re.I)
+                if bias_m and ddm_res["tx_bias_ma"] is None:
+                    try:
+                        ddm_res["tx_bias_ma"] = float(bias_m.group(1))
+                    except ValueError:
+                        pass
+
+                temp_m = re.search(r"(?:Module temperature|temperature)[^:]*:\s*([-0-9.]+)\s*(?:degrees\s*C|C)", content, re.I)
+                if temp_m and ddm_res["temperature_c"] is None:
+                    try:
+                        ddm_res["temperature_c"] = float(temp_m.group(1))
+                    except ValueError:
+                        pass
+
+                volt_m = re.search(r"(?:Module voltage|voltage)[^:]*:\s*([-0-9.]+)\s*V", content, re.I)
+                if volt_m and ddm_res["voltage_v"] is None:
+                    try:
+                        ddm_res["voltage_v"] = float(volt_m.group(1))
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+    res["optical_ddm"] = ddm_res
+
+with open(out_file, "w", encoding="utf-8") as out_f:
+    json.dump(res, out_f, indent=2)
+' "${TEMP_DIR}/physical_layer.json" "${flaps:-0}" "${ddm_files[@]}" 2>/dev/null || true
+    fi
+
     # =========================================================================
     # 2. LAYER 2: MAC ADDRESSES & 802.1Q VLAN TAGGING
     # =========================================================================
@@ -253,7 +317,7 @@ analyze_session() {
 
     echo -e "${C_CYAN}Discovered IEEE 802.1Q VLAN Tags:${C_RESET}"
     local vlan_ids
-    vlan_ids=$(grep -oE "vlan [0-9]+" "${dump_file}" | awk '{print $2}' | sort -nu || true)
+    vlan_ids=$(grep -oE "vlan [0-9]+" "${dump_file}" | awk '$2 >= 0 && $2 <= 4095 {print $2}' | sort -nu || true)
     
     if [[ "${qinq_count}" -gt 0 ]]; then
         echo -e "  ${C_CYAN}[FOUND] QinQ Double-Tagging (802.1ad):${C_RESET} ${qinq_count} nested VLAN frame(s) observed."
@@ -449,8 +513,20 @@ analyze_session() {
         grep -oE '(\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|\b([0-9a-fA-F]{1,4}:)+:[0-9a-fA-F:]*|\b::([0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{1,4}|\bfe80::[0-9a-fA-F:]+)(/[0-9]+)?' | \
         grep -vE '/[0-9]+' | \
         sed -E 's/([^:]):$/\1/' | grep -vE '^(:|::)$' | grep -vE '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$' | sort -u > "${TEMP_DIR}/observed_ipv6.txt" || true
-    # Exclude multicast (ff00::/8), loopback (::1), unspecified (::)
-    grep -ivE '(^ff[0-9a-f]{2}:|^::1$|^::$)' "${TEMP_DIR}/observed_ipv6.txt" > "${TEMP_DIR}/clean_ipv6.txt" || true
+    # Exclude multicast (ff00::/8), loopback (::1), unspecified (::) and validate RFC compliance
+    grep -ivE '(^ff[0-9a-f]{2}:|^::1$|^::$)' "${TEMP_DIR}/observed_ipv6.txt" | \
+        python3 -B -c '
+import sys, ipaddress
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        ip = ipaddress.IPv6Address(line)
+        if not (ip.is_multicast or ip.is_loopback or ip.is_unspecified):
+            print(ip.compressed)
+    except Exception:
+        pass
+' | sort -u > "${TEMP_DIR}/clean_ipv6.txt" || true
 
     local ipv6_count
     ipv6_count=$(wc -l < "${TEMP_DIR}/clean_ipv6.txt")
@@ -949,15 +1025,12 @@ except Exception:
                 -e dhcp.option.hostname \
                 -e dhcp.fqdn.name \
                 -e dns.qry.name \
-                -e tls.handshake.extensions_server_name 2>/dev/null >> "${tshark_dump}" || true
+                -e tls.handshake.extensions_server_name \
+                -e tcp.analysis.retransmission 2>/dev/null >> "${tshark_dump}" || true
         done
 
         local tshark_retrans=0
-        for pf in "${files_to_analyze[@]}"; do
-            local rc
-            rc=$( (tshark -r "${pf}" -Y "tcp.analysis.retransmission" 2>/dev/null || true) | wc -l)
-            tshark_retrans=$((tshark_retrans + rc))
-        done
+        tshark_retrans=$(awk -F'\t' '{if ($11 != "") count++} END {print count+0}' "${tshark_dump}" 2>/dev/null || echo "0")
         if [[ ${tshark_retrans} -gt ${tcp_retrans} ]]; then
             tcp_retrans=${tshark_retrans}
         fi
@@ -1200,11 +1273,14 @@ if os.path.exists(dump_path):
                         if key not in discovered_hosts_dict and current_src_mac:
                             discovered_hosts_dict[key] = current_src_mac
                 else:
-                    v6_icmp_m = re.search(r"([0-9a-fA-F:]+)\s+>\s+([0-9a-fA-F:]+):\s+ICMP6", line)
+                    cleaned_line = re.sub(r"^[0-9:.]+ +[0-9a-fA-F:]{17} +> +[0-9a-fA-F:]{17},? *", "", line)
+                    cleaned_line = re.sub(r"\([^)]+\)", "", cleaned_line)
+                    v6_icmp_m = re.search(r"([0-9a-fA-F:]+)\s+>\s+([0-9a-fA-F:]+):\s*(?:\[[^\]]*\]\s*)?ICMP6", cleaned_line)
                     if v6_icmp_m:
                         resp_ip = v6_icmp_m.group(1).lower()
                         is_pmtud_hop = ("need to frag" in line or "packet too big" in line)
-                        if not probed_ips or resp_ip in probed_ips or is_pmtud_hop:
+                        is_mcast_probe = any(str(p).startswith("ff02:") for p in probed_ips)
+                        if not probed_ips or resp_ip in probed_ips or is_pmtud_hop or is_mcast_probe:
                             key = (resp_ip, pkt_vlan)
                             if key not in discovered_hosts_dict and current_src_mac:
                                 discovered_hosts_dict[key] = current_src_mac
@@ -1436,6 +1512,7 @@ except Exception:
 
         cat <<EOF
 {
+  "schema_version": "1.0.0",
   "vlans": $(to_jarr "$vlan_ids"),
   "qinq_frames": ${qinq_count:-0},
   "mac_addresses": $(to_jarr "$unicast_macs"),
@@ -1517,7 +1594,7 @@ except Exception:
     "dns_queries": $(to_jarr "$dns_names" 253),
     "tls_sni": $(to_jarr "$tls_sni" 253)
   },
-  "top_talkers": $(if [[ -s "${TEMP_DIR}/top_talkers.json" ]]; then cat "${TEMP_DIR}/top_talkers.json"; else echo '{"ipv4":[],"ipv6":[],"flows":[]}'; fi)$(if [[ -s "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
+  "top_talkers": $(if [[ -s "${TEMP_DIR}/top_talkers.json" ]]; then cat "${TEMP_DIR}/top_talkers.json"; else echo '{"ipv4":[],"ipv6":[],"flows":[]}'; fi)$(if [[ -s "${TEMP_DIR}/physical_layer.json" ]]; then echo "  , \"physical_layer\": "; cat "${TEMP_DIR}/physical_layer.json"; fi)$(if [[ -s "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
 }
 EOF
     fi

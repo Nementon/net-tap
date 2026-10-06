@@ -251,6 +251,8 @@ assert_fail "Hardware type must be" "$BIN_PATH" on -i lo -t "invalidtype"
 assert_fail "Operational mode must be 'passive' or 'active'" "$BIN_PATH" on -i lo --mode "invalidmode"
 assert_fail "Probe rate must be a positive integer" "$BIN_PATH" probe -i lo --arp-scan --rate 0
 assert_fail "Probe rate must be a positive integer" "$BIN_PATH" probe -i lo --arp-scan --rate "notanumber"
+assert_fail "Probe rate exceeds safety limit" "$BIN_PATH" probe -i lo --tcp-syn --rate 5001
+assert_fail "Broadcast probe rate exceeds safety limit" "$BIN_PATH" probe -i lo --arp-scan --rate 1001
 assert_fail "Probe timeout must be a positive integer in seconds" "$BIN_PATH" probe -i lo --arp-scan --timeout 0
 assert_fail "Probe timeout must be a positive integer in seconds" "$BIN_PATH" probe -i lo --arp-scan --timeout "notanumber"
 assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --vlan 5000
@@ -437,6 +439,10 @@ if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; 
         }
         
         assert_jq .
+        assert_jq '.schema_version == "1.0.0"'
+        assert_jq '.physical_layer.optical_ddm.rx_power_dbm == -2.35'
+        assert_jq '.physical_layer.optical_ddm.tx_power_dbm == -1.82'
+        assert_jq '.physical_layer.link_flaps == 0'
         assert_jq '.vlans | index("10") != null'
         assert_jq '.vlans | index("100") != null'
         assert_jq '.vlans | index("200") != null'

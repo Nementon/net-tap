@@ -66,7 +66,7 @@ jobs:
       - name: Normalize Artifact Permissions
         if: failure()
         run: |
-          sudo chmod -R a+r /var/run/net-tap/ /tmp/net-tap-* 2>/dev/null || true
+          sudo chmod -R a+r /var/run/net-tap/ /tmp/net-tap-* /tmp/net_tap_* 2>/dev/null || true
 
       - name: Archive Test Failure Diagnostics
         if: failure()
@@ -76,4 +76,5 @@ jobs:
           path: |
             /var/run/net-tap/
             /tmp/net-tap-*
+            /tmp/net_tap_*
           if-no-files-found: ignore

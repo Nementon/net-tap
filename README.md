@@ -57,7 +57,12 @@
 - [Session Artifacts Inventory](#session-artifacts-inventory)
 - [Exit Codes Reference](#exit-codes-reference)
 - [Operating System & NetworkManager Coexistence](#operating-system--networkmanager-coexistence)
+  - [Built-in Zero-Egress Protection](#built-in-zero-egress-protection)
+  - [Explicit NetworkManager Unmanaged Configuration](#explicit-networkmanager-unmanaged-configuration-recommended)
 - [Testing & Quality Assurance](#testing--quality-assurance)
+  - [1. Unprivileged Unit & Compliance Tests](#1-unprivileged-unit--compliance-tests)
+  - [2. Privileged Integration & Network Namespace Suite](#2-privileged-integration--network-namespace-suite)
+  - [3. Continuous Integration](#3-continuous-integration)
 - [Troubleshooting](#troubleshooting)
 - [Disclaimer & License](#disclaimer--license)
 
@@ -113,7 +118,7 @@ flowchart TD
     subgraph Kernel ["Linux Kernel Network Subsystem"]
         TC["tc qdisc add clsact<br/>tc filter add egress pref 1 matchall action drop"]
         IPT["iptables / ip6tables -t raw<br/>PREROUTING NOTRACK<br/>OUTPUT DROP"]
-        SYSCTL["36 Non-Destructive Stealth Sysctls<br/>(ARP, NDP, SLAAC, DAD, MLD, IGMP Silenced)"]
+        SYSCTL["38 Non-Destructive Stealth Sysctls<br/>(ARP, NDP, SLAAC, DAD, MLD, IGMP Silenced)"]
         QDISC["txqueuelen 0"]
     end
 
@@ -140,7 +145,7 @@ flowchart TD
 flowchart LR
     Start(["net-tap on"]) --> Lock["Acquire Locks<br/>.lock_master & .lock_dev"]
     Lock --> Preflight["Pre-flight Validation<br/>(Root/Caps, Bridge Enslavement Check, DLT)"]
-    Preflight -->|"Pass"| Configure["Apply 36 Stealth Sysctls,<br/>tc matchall Drop, NOTRACK Rules"]
+    Preflight -->|"Pass"| Configure["Apply 38 Stealth Sysctls,<br/>tc matchall Drop, NOTRACK Rules"]
     Preflight -->|"Fail"| Abort["Abort & Rollback<br/>(Untouched IFs Unharmed)"]
     Configure --> Spawn["Spawn tcpdump (-B 65536)<br/>Start Disk Watchdog & Timer"]
     Spawn --> Running[("Active Stealth Capture<br/>Ring Buffer Rotation")]
@@ -399,6 +404,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | :--- | :--- | :--- | :--- |
 | `-i` | `--interface` | Clean specific interface session only. | All sessions |
 | `-n` | `--netns` | Target specific network namespace for cleanup. | All namespaces |
+| -    | `--force` | Force termination of running captures and cleanup during session reconciliation. | Disabled |
 
 #### Environment Variables
 | Variable | Description | Default |
@@ -416,6 +422,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | `DEFAULT_SPEED` | Default link speed in Mbps forced on SFP transceivers if `-s` is omitted. | Auto |
 | `DEFAULT_ROTATE_SIZE` | Default ring-buffer max size per PCAP file in MB if `-C` is omitted. | `100` |
 | `DEFAULT_ROTATE_COUNT` | Default ring-buffer chunk retention file count if `-W` is omitted. | `10` |
+| `FORCE_CLEAN` | When set to `1`, forces termination of running captures during `clean` (`--force`). | `0` |
 
 ---
 
@@ -534,7 +541,7 @@ net-tap analyze -d /data/trace --json > network_profile.json
 
 ### 7. Active Probing & Lab Network Auditing
 When auditing lab switches, edge routers, or testbed segments where active stimulus is required, `net-tap` supports **Controlled Active Probing Mode** (`--mode active`). In this mode:
-- All 36 stealth sysctls remain fully engaged.
+- All 38 stealth sysctls remain fully engaged.
 - Kernel `tc clsact` selective egress guards permit ONLY raw frames explicitly stamped with `SO_MARK 0x7a9` (fwmark 1961), while dropping all unsolicited host OS emissions (SLAAC, DAD, mDNS, etc.).
 - Every transmitted packet is rate-limited and logged to a structured `<timestamp>_<iface>_probe_audit.jsonl` audit log.
 - Supports raw Layer 2 802.1Q single-tagging (`--vlan`), 802.1ad QinQ double-tagging (`--qinq`), and smart `--auto-vlans` sweeping across passively observed tags.
@@ -549,27 +556,31 @@ sudo net-tap probe -i eth1 --arp-scan 192.168.1.0/24 --rate 50
 # 3. Run ARP discovery on a specific 802.1Q VLAN
 sudo net-tap probe -i eth1 --vlan 100 --arp-scan 10.100.1.0/24
 
-# 4. Smart Passive-to-Active Discovery: Automatically sweep across all observed VLANs
+# 4. Run IPv6 NDP discovery (routers & neighbors)
+sudo net-tap probe -i eth1 --ndp-scan ff02::2
+
+# 5. Smart Passive-to-Active Discovery: Automatically sweep across all observed VLANs
 sudo net-tap probe -i eth1 --auto-vlans --arp-scan 10.0.0.0/24
 
-# 5. Broadcast DHCP Discover to audit DHCP servers & Option 82 relays
+# 6. Broadcast DHCPv4 Discover or DHCPv6 Solicit to audit addressing servers
 sudo net-tap probe -i eth1 --dhcp-discover
+sudo net-tap probe -i eth1 --dhcp-discover6
 
-# 6. Measure Path MTU using stepped DF-bit ICMP Echo requests
+# 7. Measure Path MTU using stepped DF-bit ICMP Echo requests
 sudo net-tap probe -i eth1 --icmp-pmtu 192.168.1.1
 
-# 7. Check specific TCP services with light SYN probes and custom source IP
+# 8. Check specific TCP services with light SYN probes and custom source IP
 sudo net-tap probe -i eth1 --tcp-syn 192.168.1.1 --src-ip 192.168.1.253 -p 22,80,443,8080
 
-# 8. Audit 802.1X Network Access Control (NAC) on switch port
+# 9. Audit 802.1X Network Access Control (NAC) on switch port
 sudo net-tap probe -i eth1 --eapol-check
 
-# 9. Query network infrastructure: SNMP sysDescr, DNS version, and NetBIOS
+# 10. Query network infrastructure: SNMP sysDescr, DNS version, and NetBIOS
 sudo net-tap probe -i eth1 --snmp-probe 192.168.1.1 --community public
 sudo net-tap probe -i eth1 --dns-probe 192.168.1.1
 sudo net-tap probe -i eth1 --nbns-probe 192.168.1.50
 
-# 10. Stop capture and correlate responses
+# 11. Stop capture and correlate responses
 sudo net-tap off -i eth1
 net-tap analyze -d /data/lab_audit
 ```
@@ -732,7 +743,7 @@ The `--icmp-pmtu <target>` probe diagnoses MTU black holes, baby jumbo frame han
 **Implementation Details:**
 - **Dual-Stack Stepped Envelope Probing**: Transmits ICMP Echo Requests (with IPv4 **Don't Fragment (DF)** bit set, or standard IPv6 Echo Requests) across standard network MTU thresholds:
   - **IPv4 Stepped Envelope**: `576` (RFC 791 Minimum Reassembly Buffer), `1280` (IPv6 Min MTU), `1420` (WireGuard / VPN MTU), `1450` (OpenStack VXLAN), `1492` (PPPoE MTU), `1500` (Standard Ethernet), `2000` (Routed MTU), `4000` (Intermediate Jumbo), and `9000` (Standard Jumbo Frame MTU).
-  - **IPv6 Stepped Envelope**: `1280` (RFC 8200 IPv6 Minimum Link MTU), `1420` (IPv6-in-IPv4 / WireGuard / Overlay Tunnel MTU), `1500` (Standard Ethernet), `2000`, `4000`, and `9000` (Jumbo Frame MTU).
+  - **IPv6 Stepped Envelope**: `1280` (RFC 8200 IPv6 Minimum Link MTU), `1420` (IPv6-in-IPv4 / WireGuard / Overlay Tunnel MTU), `1450` (OpenStack VXLAN), `1492` (PPPoE MTU), `1500` (Standard Ethernet), `2000`, `4000`, and `9000` (Jumbo Frame MTU).
 - **Local MTU Exceeded Handling (`EMSGSIZE`)**: When attempting to inject a 9000-byte frame onto an interface configured with MTU 1500, the Linux kernel raw socket returns `OSError: [Errno 90] Message too long` (`EMSGSIZE`). [`lib/probe.py`](lib/probe.py) catches `EMSGSIZE` gracefully, logging status `local_mtu_exceeded` in the audit trail without terminating execution.
 - **Next-Hop MTU Determination**: If an upstream router cannot forward a packet due to an MTU constraint and the DF bit is set, it drops the packet and returns an **ICMP Type 3 Code 4** (*Destination Unreachable: Fragmentation Needed and DF set*), indicating the exact Next-Hop MTU. If no reply is received, an MTU black hole is detected.
 
@@ -848,7 +859,7 @@ When connecting to an 802.1Q trunk port with dozens or hundreds of VLANs, manual
 1. **Passive Chunk Inspection**: When `--auto-vlans` is passed to `net-tap probe`, [`lib/probe.sh`](lib/probe.sh) dynamically reads the captured PCAP files in the active session directory using `tcpdump` and `awk`.
 2. **VLAN Set Extraction**: Unique 802.1Q tags observed across ingress broadcast, multicast, or unicast frames are extracted, sorted, and validated.
 3. **Sequential Execution**: The probe engine iterates through each discovered VLAN ID, tagging outgoing frames with `Dot1Q(vlan=vid)` and stamping them with fwmark `0x7a9`.
-4. **Unified Correlation**: Results across all VLANs are logged with their corresponding `vlan_tag` field in `probe_audit.jsonl`, enabling `net-tap analyze` to present a unified multi-VLAN topology map.
+4. **Unified Correlation**: Results across all VLANs are logged with their corresponding `vlan` field in `probe_audit.jsonl`, enabling `net-tap analyze` to present a unified multi-VLAN topology map.
 
 ```mermaid
 flowchart TD
@@ -926,6 +937,9 @@ sudo net-tap clean -i eth0
 
 # Target a specific network namespace
 sudo net-tap clean -n prod_vrf -i veth-tap
+
+# Force termination of active or hung captures and purge all session locks
+sudo net-tap clean --force
 ```
 
 **What `clean` Does:**
@@ -1019,7 +1033,7 @@ Network Tunnels & Overlay Encapsulation:
   [ALERT] SCTP Telecom Signaling: 1 IP/132 carrier packet(s).
   [FOUND] IS-IS Routing Protocol: 1 frame(s) observed.
   [FOUND] BFD Fault Detection: 1 frame(s) observed.
-  [WARN] Path MTU Discovery (PTB/Frag Needed): 1 frame(s) observed.
+  [WARN] Path MTU Discovery (PTB/Frag Needed): 1 frame(s) observed. (Reported Next-Hop MTUs: 1492)
 
 TCP Connection State Matrix & Options:
   SYN Requests : 42 | SYN-ACK Handshakes : 40 | RST Aborts : 2 | FIN Closes : 38
@@ -1040,7 +1054,7 @@ Top Active Host Talkers & Conversations:
   [FOUND] Spanning Tree Protocol (STP): 28 BPDUs observed.
   [FOUND] VRRP (Virtual Router Redundancy): 2 frames observed.
   [FOUND] Cisco HSRP: 1 frames observed.
-  [FOUND] LACP (Link Aggregation Control): 1 frames observed.
+  [FOUND] LACP (Link Aggregation Control Protocol): 1 frames observed.
 
 ======================================================================
  [5] LAYER 2 SECURITY & ADMISSION CONTROL PROFILE

@@ -352,6 +352,57 @@ class TestProbeUnit(unittest.TestCase):
             if os.path.exists(audit_path):
                 os.unlink(audit_path)
 
+        captured_packets.clear()
+        # 3. SNMP sysDescr query
+        test_args_snmp = [
+            "probe.py", "-i", "dummy0", "-t", "snmp", "--target", "192.168.1.1",
+            "--community", "public",
+            "--audit-file", audit_path, "--audit-id", "test_snmp"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_snmp):
+                probe.main()
+            self.assertEqual(len(captured_packets), 1)
+            snmp_pkt = captured_packets[0]
+            self.assertTrue(snmp_pkt.haslayer(UDP))
+            self.assertEqual(snmp_pkt[UDP].dport, 161)
+            self.assertTrue(snmp_pkt.haslayer(probe.snmp.SNMP))
+            self.assertEqual(snmp_pkt[probe.snmp.SNMP].community, b"public")
+            self.assertEqual(snmp_pkt[probe.snmp.SNMP].PDU.id, probe.PROBE_FWMARK)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    @patch("probe.create_probe_socket")
+    def test_main_nbns_probe(self, mock_create_sock):
+        """Test NetBIOS Name Service (NBNS) node status probe on UDP port 137."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured_packets = []
+        mock_sock.send.side_effect = lambda b: captured_packets.append(Ether(b))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        test_args_nbns = [
+            "probe.py", "-i", "dummy0", "-t", "nbns", "--target", "192.168.1.50",
+            "--audit-file", audit_path, "--audit-id", "test_nbns"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_nbns):
+                probe.main()
+            self.assertEqual(len(captured_packets), 1)
+            nbns_pkt = captured_packets[0]
+            self.assertTrue(nbns_pkt.haslayer(UDP))
+            self.assertEqual(nbns_pkt[UDP].dport, 137)
+            # NetBIOS transaction ID is watermarked with 1961
+            payload = bytes(nbns_pkt[UDP].payload)
+            trans_id = struct.unpack("!H", payload[:2])[0]
+            self.assertEqual(trans_id, probe.PROBE_FWMARK)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
     @patch("probe.create_probe_socket")
     def test_main_pmtu_ipv4_and_ipv6_probes(self, mock_create_sock):
         """Test IPv4 PMTU (DF bit set, ID 1961) and IPv6 PMTU (Flow Label 1961, stepped sizes)."""

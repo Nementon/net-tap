@@ -391,13 +391,13 @@ main() {
                 exit 1
             fi
             IFS='.' read -r o1 o2 o3 o4 <<< "${PROBE_SRC_IP}"
-            if [[ "$o1" -gt 255 || "$o2" -gt 255 || "$o3" -gt 255 || "$o4" -gt 255 ]]; then
+            if [[ "$((10#$o1))" -gt 255 || "$((10#$o2))" -gt 255 || "$((10#$o3))" -gt 255 || "$((10#$o4))" -gt 255 ]]; then
                 log_err "IPv4 octets must be between 0 and 255: '${PROBE_SRC_IP}'."
                 exit 1
             fi
         fi
         if [[ -n "${PROBE_SRC_IP6}" ]]; then
-            if ! [[ "${PROBE_SRC_IP6}" =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]]; then
+            if ! python3 -B -c "import ipaddress, sys; ipaddress.IPv6Address(sys.argv[1])" "${PROBE_SRC_IP6}" >/dev/null 2>&1; then
                 log_err "Invalid source IPv6 address format: '${PROBE_SRC_IP6}'."
                 exit 1
             fi
@@ -453,23 +453,26 @@ main() {
                 if [[ "${tok}" == *"-"* ]]; then
                     local v_start="${tok%%-*}"
                     local v_end="${tok##*-}"
-                    if [[ "${v_start}" -lt 1 || "${v_start}" -gt 4094 || "${v_end}" -lt 1 || "${v_end}" -gt 4094 ]]; then
+                    local v_s_dec=$((10#$v_start))
+                    local v_e_dec=$((10#$v_end))
+                    if [[ "${v_s_dec}" -lt 1 || "${v_s_dec}" -gt 4094 || "${v_e_dec}" -lt 1 || "${v_e_dec}" -gt 4094 ]]; then
                         log_err "VLAN ID must be an integer between 1 and 4094."
                         exit 1
                     fi
-                    if [[ "${v_start}" -gt "${v_end}" ]]; then
+                    if [[ "${v_s_dec}" -gt "${v_e_dec}" ]]; then
                         log_err "Invalid VLAN range '${tok}': start (${v_start}) cannot be greater than end (${v_end})."
                         exit 1
                     fi
-                    for ((v = v_start; v <= v_end; v++)); do
+                    for ((v = v_s_dec; v <= v_e_dec; v++)); do
                         expanded_vlans+=("${v}")
                     done
                 else
-                    if [[ "${tok}" -lt 1 || "${tok}" -gt 4094 ]]; then
+                    local tok_dec=$((10#$tok))
+                    if [[ "${tok_dec}" -lt 1 || "${tok_dec}" -gt 4094 ]]; then
                         log_err "VLAN ID must be an integer between 1 and 4094."
                         exit 1
                     fi
-                    expanded_vlans+=("${tok}")
+                    expanded_vlans+=("${tok_dec}")
                 fi
             done
             PROBE_VLAN=$(printf "%s\n" "${expanded_vlans[@]}" | sort -n -u | paste -sd, -)
@@ -480,7 +483,8 @@ main() {
                 exit 1
             fi
             local q_s="${PROBE_QINQ%%,*}" q_c="${PROBE_QINQ##*,}"
-            if [[ "$q_s" -lt 1 || "$q_s" -gt 4094 || "$q_c" -lt 1 || "$q_c" -gt 4094 ]]; then
+            local q_s_dec=$((10#$q_s)) q_c_dec=$((10#$q_c))
+            if [[ "$q_s_dec" -lt 1 || "$q_s_dec" -gt 4094 || "$q_c_dec" -lt 1 || "$q_c_dec" -gt 4094 ]]; then
                 log_err "QinQ tags must be integers between 1 and 4094 (got ${q_s},${q_c})."
                 exit 1
             fi

@@ -43,6 +43,12 @@ detect_port_status() {
 # --- Helper: Unified Interface State Restorer ---
 restore_interface_state() {
     local iface="$1"
+    declare -g -A ORIG_PROMISC ORIG_ARP ORIG_MTU ORIG_TXQLEN ORIG_RX_RING ORIG_GRO ORIG_LRO ORIG_TSO ORIG_GSO ORIG_RX ORIG_RXVLAN ORIG_RX_VLAN_FILTER ORIG_RX_ALL
+    declare -g -A ORIG_IPV6_DISABLE ORIG_IPV6_KEEP_ADDR ORIG_IPV6_ADDR_GEN ORIG_IPV6_DAD ORIG_IPV6_DADT ORIG_IPV6_RA ORIG_IPV6_RS ORIG_IPV6_AUTOCONF ORIG_IPV6_TEMP ORIG_IPV6_EDAD ORIG_IPV6_NDISC ORIG_IPV6_REDIR
+    declare -g -A ORIG_MLDV1_INTVAL ORIG_MLDV2_INTVAL ORIG_MLD_VER ORIG_DROP_UNA ORIG_ACCEPT_UNA ORIG_IPV6_FWD ORIG_IPV6_MC_FWD ORIG_PROXY_NDP ORIG_IPV6_DROP_UNICAST_L2M
+    declare -g -A ORIG_ARP_IGNORE ORIG_ARP_ANNOUNCE ORIG_ARP_FILTER ORIG_ARP_NOTIFY ORIG_DROP_GARP ORIG_ARP_ACCEPT ORIG_PROXY_ARP ORIG_PROXY_ARP_PVLAN ORIG_SEND_REDIRECTS ORIG_ACCEPT_REDIRECTS ORIG_SECURE_REDIRECTS ORIG_DROP_UNICAST_L2M
+    declare -g -A ORIG_IGMPV2_INTVAL ORIG_IGMPV3_INTVAL ORIG_IGMP_VER ORIG_IPV4_FWD ORIG_IPV4_MC_FWD ORIG_IPV4_BC_FWD ORIG_OPERSTATE
+    declare -g -A ORIG_PAUSE_AUTONEG ORIG_PAUSE_RX ORIG_PAUSE_TX ORIG_EEE ORIG_NM_MANAGED ORIG_WOL
     # 1. Down interface first to eliminate packet leaks during re-configuration
     cmd_netns ip link set dev "${iface}" down 2>/dev/null || true
 
@@ -206,7 +212,7 @@ _disk_watchdog_worker() {
             local pfx="${session_ts:-*}${session_ts:+_}${dev}_trace.pcap*"
             while IFS= read -r f; do
                 [[ -f "$f" ]] && chunk_files+=("$f")
-            done < <(find "${outdir}" -maxdepth 1 -name "${pfx}" -printf "%T@ %p\n" 2>/dev/null | sort -nr | awk '{print $2}')
+            done < <(find "${outdir}" -maxdepth 1 -name "${pfx}" -printf "%T@ %p\n" 2>/dev/null | sort -nr | cut -d' ' -f2-)
             if [[ ${#chunk_files[@]} -gt ${rot_count} ]]; then
                 for ((idx=rot_count; idx<${#chunk_files[@]}; idx++)); do
                     rm -f "${chunk_files[$idx]}" 2>/dev/null || true

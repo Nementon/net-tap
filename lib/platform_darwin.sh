@@ -106,7 +106,13 @@ platform_restore_interface_state() {
 
 platform_stat_owner() {
     local target="$1"
-    stat -f "%u" "${target}" 2>/dev/null || python3 -c "import os, sys; print(os.stat(sys.argv[1]).st_uid)" "${target}" 2>/dev/null || echo "-1"
+    local res
+    res=$(stat -f "%u" "${target}" 2>/dev/null || true)
+    if [[ -n "${res}" && "${res}" =~ ^[0-9]+$ ]]; then
+        echo "${res}"
+        return
+    fi
+    python3 -c "import os, sys; print(os.stat(sys.argv[1]).st_uid)" "${target}" 2>/dev/null || echo "-1"
 }
 
 platform_stat_perm() {
@@ -114,15 +120,34 @@ platform_stat_perm() {
     local p=""
     p=$(stat -f "%OLp" "${target}" 2>/dev/null || true)
     p="${p#0}"
-    if [[ -z "$p" ]]; then
-        p=$(python3 -c "import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])" "${target}" 2>/dev/null || echo "777")
+    if [[ -n "$p" && "$p" =~ ^[0-7]+$ ]]; then
+        echo "$p"
+        return
     fi
+    p=$(python3 -c "import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])" "${target}" 2>/dev/null || echo "777")
     echo "${p:-777}"
 }
 
 platform_stat_nlinks() {
     local target="$1"
-    stat -f "%l" "${target}" 2>/dev/null || python3 -c "import os, sys; print(os.stat(sys.argv[1]).st_nlink)" "${target}" 2>/dev/null || echo "0"
+    local res
+    res=$(stat -f "%l" "${target}" 2>/dev/null || true)
+    if [[ -n "${res}" && "${res}" =~ ^[0-9]+$ ]]; then
+        echo "${res}"
+        return
+    fi
+    python3 -c "import os, sys; print(os.stat(sys.argv[1]).st_nlink)" "${target}" 2>/dev/null || echo "0"
+}
+
+platform_stat_mtime() {
+    local target="$1"
+    local res
+    res=$(stat -f "%m" "${target}" 2>/dev/null || true)
+    if [[ -n "${res}" && "${res}" =~ ^[0-9]+$ ]]; then
+        echo "${res}"
+        return
+    fi
+    python3 -c "import os, sys; print(int(os.path.getmtime(sys.argv[1])))" "${target}" 2>/dev/null || echo "0"
 }
 
 platform_proc_starttime() {

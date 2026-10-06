@@ -396,6 +396,26 @@ start_tap() {
             local PID_TCPDUMP=$!
             PIDS_TCPDUMP+=("${PID_TCPDUMP}")
             PCAP_FILES+=("${PCAP_FILE}")
+            TCPDUMP_ERRS+=("${TCPDUMP_ERR}")
+            DMESG_LOGS+=("${DMESG_LOG}")
+            LINK_LOGS+=("${LINK_LOG}")
+
+            # Poll liveness up to 5 seconds
+            local wait_tcpdump=0
+            local tcpdump_alive=0
+            while [[ $wait_tcpdump -lt 50 ]]; do
+                if kill -0 "${PID_TCPDUMP}" 2>/dev/null && [[ "$(get_proc_comm "${PID_TCPDUMP}")" =~ tcpdump ]]; then
+                    tcpdump_alive=1
+                    break
+                fi
+                sleep 0.1
+                wait_tcpdump=$((wait_tcpdump + 1))
+            done
+
+            if [[ ${tcpdump_alive} -eq 0 ]]; then
+                log_err "tcpdump failed to start or exited unexpectedly for ${iface}. Check: ${TCPDUMP_ERR}"
+                exit 1
+            fi
             continue
         fi
 
@@ -710,7 +730,7 @@ start_tap() {
         log_warn "Egress filters will block them, but they may cause interrupt load. Consider stopping them."
     fi
 
-    SCRIPT_PATH="${SCRIPT_PATH:-$(readlink -f "$0")}"
+    SCRIPT_PATH="${SCRIPT_PATH:-$(resolve_path "$0")}"
     if [[ -n "${DURATION}" ]] && [[ "${DURATION}" =~ ^[0-9]+$ ]]; then
         log_info "Scheduling auto-shutdown in ${DURATION} seconds..."
         ( _close_lock_fds; exec -a net-tap-autoshutdown "${BASH:-bash}" -c 'source "'"${LIB_DIR}"'/core.sh"; source "'"${LIB_DIR}"'/orchestration.sh"; _autoshutdown_worker "$@"' -- "${DURATION}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" ) >/dev/null 2>&1 &
@@ -1170,17 +1190,20 @@ clean_sessions() {
             exit 1
         fi
     else
-        local start_t
-        start_t=$(date +%s)
-        while ! mkdir "${master_dir}" 2>/dev/null; do
-            local now_t
-            now_t=$(date +%s)
-            if (( now_t - start_t >= 10 )); then
+        if [[ "${FORCE_CLEAN:-0}" -eq 1 ]]; then
+            rm -rf "${master_dir}" 2>/dev/null || true
+        fi
+        if ! _acquire_atomic_lockdir "${master_dir}" 10; then
+            if [[ "${FORCE_CLEAN:-0}" -eq 1 ]]; then
+                log_warn "Force clean: removing master lock directory '${master_dir}'..."
+                rm -rf "${master_dir}" 2>/dev/null || true
+                mkdir -p "${master_dir}"
+                echo "$$" > "${master_dir}/pid" 2>/dev/null || true
+            else
                 log_err "Could not acquire directory master lock within 10s."
                 exit 1
             fi
-            sleep 0.1
-        done
+        fi
     fi
 
     if [[ -d "${STATE_DIR}" ]]; then
@@ -1318,7 +1341,9 @@ clean_sessions() {
             done
             for lkd in "${STATE_DIR}"/.lock_*.lockdir; do
                 [[ -d "${lkd}" ]] || continue
-                if rmdir "${lkd}" 2>/dev/null; then
+                [[ "$(basename "${lkd}")" == ".lock_master.lockdir" ]] && continue
+                if [[ "${FORCE_CLEAN:-0}" -eq 1 ]] || _is_lockdir_stale "${lkd}"; then
+                    rm -rf "${lkd}" 2>/dev/null || true
                     cleaned_locks=$((cleaned_locks + 1))
                 fi
             done
@@ -1336,7 +1361,8 @@ clean_sessions() {
                 fi
             fi
             if [[ -d "${lk}.lockdir" ]]; then
-                if rmdir "${lk}.lockdir" 2>/dev/null; then
+                if [[ "${FORCE_CLEAN:-0}" -eq 1 ]] || _is_lockdir_stale "${lk}.lockdir"; then
+                    rm -rf "${lk}.lockdir" 2>/dev/null || true
                     cleaned_locks=$((cleaned_locks + 1))
                 fi
             fi
@@ -1347,7 +1373,7 @@ clean_sessions() {
         flock -u "${master_fd}" 2>/dev/null || true
         _close_fd "${master_fd}"
     fi
-    rmdir "${master_lock}.lockdir" 2>/dev/null || true
+    rm -rf "${master_lock}.lockdir" 2>/dev/null || true
 
     log_ok "Cleanup complete: ${cleaned_sessions} session(s) detached, ${cleaned_locks} lock file(s) purged."
 }

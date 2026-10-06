@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, "feat/*" ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, "feat/*" ]
 
 permissions:
   contents: read
@@ -82,3 +82,41 @@ jobs:
             /tmp/net-tap-*
             /tmp/net_tap_*
           if-no-files-found: ignore
+
+  test-darwin:
+    name: macOS Darwin Test Suite (macos-14)
+    runs-on: macos-14
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install macOS Dependencies
+        run: |
+          brew install bash jq shellcheck
+          python3 -m pip install --break-system-packages scapy jsonschema ruff mypy || python3 -m pip install scapy jsonschema ruff mypy
+
+      - name: Run Linters & Static Analysis
+        run: |
+          shellcheck bin/net-tap.sh lib/*.sh tests/*.sh
+          ruff check lib/ tests/
+          mypy --ignore-missing-imports lib/probe.py
+
+      - name: Run Python Mock & Unit Tests
+        run: |
+          python3 -B tests/test_probe_unit.py
+
+      - name: Run Unprivileged Darwin Compliance Suite
+        run: |
+          BASH_BIN=$(command -v /opt/homebrew/bin/bash || command -v /usr/local/bin/bash || command -v bash)
+          "$BASH_BIN" tests/run_tests.sh
+
+      - name: Run Privileged Darwin Session Lifecycle
+        run: |
+          BASH_BIN=$(command -v /opt/homebrew/bin/bash || command -v /usr/local/bin/bash || command -v bash)
+          sudo "$BASH_BIN" tests/run_tests.sh
+
+      - name: Verify Clean Git Working Tree
+        run: |
+          git diff --exit-code

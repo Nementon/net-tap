@@ -357,6 +357,54 @@ _close_fd() {
     fi
 }
 
+_is_lockdir_stale() {
+    local target_dir="$1"
+    if [[ -d "${target_dir}" ]]; then
+        local pid_file="${target_dir}/pid"
+        if [[ -f "${pid_file}" ]]; then
+            local owner_pid
+            owner_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
+            if [[ -n "${owner_pid}" && "${owner_pid}" =~ ^[0-9]+$ ]]; then
+                if ! kill -0 "${owner_pid}" 2>/dev/null; then
+                    return 0 # Deceased PID
+                fi
+                return 1 # Active PID
+            fi
+        fi
+        local now_t mtime_t
+        now_t=$(date +%s)
+        mtime_t=$(platform_stat_mtime "${target_dir}")
+        if [[ -n "${mtime_t}" && "${mtime_t}" =~ ^[0-9]+$ ]] && (( now_t - mtime_t > 30 )); then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+_acquire_atomic_lockdir() {
+    local target_dir="$1"
+    local timeout="${2:-10}"
+    local start_t
+    start_t=$(date +%s)
+    while ! mkdir "${target_dir}" 2>/dev/null; do
+        if _is_lockdir_stale "${target_dir}"; then
+            log_warn "Detected stale directory lock '${target_dir}' from deceased process. Purging..."
+            rm -rf "${target_dir}" 2>/dev/null || true
+            if mkdir "${target_dir}" 2>/dev/null; then
+                break
+            fi
+        fi
+        local now_t
+        now_t=$(date +%s)
+        if (( now_t - start_t >= timeout )); then
+            return 1
+        fi
+        sleep 0.1
+    done
+    echo "$$" > "${target_dir}/pid" 2>/dev/null || true
+    return 0
+}
+
 acquire_lock() {
     local target="${1:-global}"
     mkdir -p "${STATE_DIR}"
@@ -410,13 +458,17 @@ acquire_lock() {
             fi
             HELD_LOCK_FDS+=("${g_fd}")
         else
+            local newly_acquired_fds=()
             for dev in "${if_list[@]}"; do
                 local dev_lockfile="${STATE_DIR}/.lock_${lock_prefix}${dev}"
                 if [[ -L "${dev_lockfile}" ]]; then
                     log_err "Security violation: Lock file '${dev_lockfile}' is a symlink!"
                     flock -u "${master_fd}" 2>/dev/null || true
                     _close_fd "${master_fd}"
-                    release_lock
+                    for n_fd in "${newly_acquired_fds[@]}"; do
+                        flock -u "${n_fd}" 2>/dev/null || true
+                        _close_fd "${n_fd}"
+                    done
                     exit 1
                 fi
                 local d_fd
@@ -426,11 +478,15 @@ acquire_lock() {
                     flock -u "${master_fd}" 2>/dev/null || true
                     _close_fd "${master_fd}"
                     log_err "Constituent interface '${dev}' is currently locked by another active session."
-                    release_lock
+                    for n_fd in "${newly_acquired_fds[@]}"; do
+                        flock -u "${n_fd}" 2>/dev/null || true
+                        _close_fd "${n_fd}"
+                    done
                     exit 1
                 fi
-                HELD_LOCK_FDS+=("${d_fd}")
+                newly_acquired_fds+=("${d_fd}")
             done
+            HELD_LOCK_FDS+=("${newly_acquired_fds[@]}")
         fi
 
         flock -u "${master_fd}" 2>/dev/null || true
@@ -438,48 +494,37 @@ acquire_lock() {
     else
         # Directory-based atomic locking fallback for macOS Darwin when util-linux flock is absent
         local master_dir="${master_lock}.lockdir"
-        local start_t
-        start_t=$(date +%s)
-        while ! mkdir "${master_dir}" 2>/dev/null; do
-            local now_t
-            now_t=$(date +%s)
-            if (( now_t - start_t >= 10 )); then
-                log_err "Could not acquire directory master lock within 10s."
-                exit 1
-            fi
-            sleep 0.1
-        done
+        if ! _acquire_atomic_lockdir "${master_dir}" 10; then
+            log_err "Could not acquire directory master lock within 10s."
+            exit 1
+        fi
 
         if [[ ${#if_list[@]} -eq 0 ]]; then
             local global_lockdir="${STATE_DIR}/.lock_${lock_prefix}global.lockdir"
-            local g_start_t
-            g_start_t=$(date +%s)
-            while ! mkdir "${global_lockdir}" 2>/dev/null; do
-                local g_now_t
-                g_now_t=$(date +%s)
-                if (( g_now_t - g_start_t >= 10 )); then
-                    rmdir "${master_dir}" 2>/dev/null || true
-                    release_lock
-                    log_err "Could not acquire global session lock."
-                    exit 1
-                fi
-                sleep 0.1
-            done
+            if ! _acquire_atomic_lockdir "${global_lockdir}" 10; then
+                rm -rf "${master_dir}" 2>/dev/null || true
+                log_err "Could not acquire global session lock."
+                exit 1
+            fi
             HELD_LOCK_DIRS+=("${global_lockdir}")
         else
+            local newly_acquired_dirs=()
             for dev in "${if_list[@]}"; do
                 local dev_lockdir="${STATE_DIR}/.lock_${lock_prefix}${dev}.lockdir"
-                if ! mkdir "${dev_lockdir}" 2>/dev/null; then
-                    rmdir "${master_dir}" 2>/dev/null || true
+                if ! _acquire_atomic_lockdir "${dev_lockdir}" 0; then
+                    rm -rf "${master_dir}" 2>/dev/null || true
                     log_err "Constituent interface '${dev}' is currently locked by another active session."
-                    release_lock
+                    for n_dir in "${newly_acquired_dirs[@]}"; do
+                        rm -rf "${n_dir}" 2>/dev/null || true
+                    done
                     exit 1
                 fi
-                HELD_LOCK_DIRS+=("${dev_lockdir}")
+                newly_acquired_dirs+=("${dev_lockdir}")
             done
+            HELD_LOCK_DIRS+=("${newly_acquired_dirs[@]}")
         fi
 
-        rmdir "${master_dir}" 2>/dev/null || true
+        rm -rf "${master_dir}" 2>/dev/null || true
     fi
 }
 
@@ -490,7 +535,7 @@ release_lock() {
     done
     HELD_LOCK_FDS=()
     for ldir in ${HELD_LOCK_DIRS[@]+"${HELD_LOCK_DIRS[@]}"}; do
-        rmdir "${ldir}" 2>/dev/null || true
+        rm -rf "${ldir}" 2>/dev/null || true
     done
     HELD_LOCK_DIRS=()
 }

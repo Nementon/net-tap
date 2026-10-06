@@ -484,20 +484,28 @@ class TestProbeUnit(unittest.TestCase):
             self.assertEqual(mac, "02:00:00:aa:bb:cc")
 
     def test_get_link_local_ipv6_variants(self):
-        """Test procfs if_inet6 parsing, EUI-64 derivation, and fallback."""
+        """Test procfs if_inet6 parsing, ifconfig parsing, EUI-64 derivation, and fallback."""
         inet6_data = "fe80000000000000020000fffeaabbcc 02 40 20 80 eth0\n"
         with patch("os.path.exists", return_value=True), \
              patch("builtins.open", unittest.mock.mock_open(read_data=inet6_data)):
             ll = probe.get_link_local_ipv6("eth0")
             self.assertEqual(ll, str(ipaddress.IPv6Address("fe80::200:ff:feaa:bbcc")))
 
+        ifconfig_out = "eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\n        inet6 fe80::dead:beef:cafe:babe  prefixlen 64  scopeid 0x20<link>\n"
         with patch("os.path.exists", return_value=False), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=ifconfig_out)):
+            ll = probe.get_link_local_ipv6("eth0")
+            self.assertEqual(ll, "fe80::dead:beef:cafe:babe")
+
+        with patch("os.path.exists", return_value=False), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
              patch("probe.get_iface_mac", return_value="00:11:22:33:44:55"):
             ll = probe.get_link_local_ipv6("eth0")
             self.assertTrue(ll.startswith("fe80::"))
             self.assertIn("ff:fe", ll)
 
         with patch("os.path.exists", return_value=False), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
              patch("probe.get_iface_mac", side_effect=Exception("error")):
             ll = probe.get_link_local_ipv6("eth0")
             self.assertEqual(ll, "fe80::1")

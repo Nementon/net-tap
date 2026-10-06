@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# shellcheck disable=SC2001,SC2317
+# shellcheck disable=SC2001 # Multiline list indentation formatting using sed is preferred over bash parameter expansion
 
 analyze_session() {
     verify_dependencies

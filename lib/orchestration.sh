@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# shellcheck disable=SC2317,SC2015,SC1091,SC2086
+# shellcheck disable=SC2317 # Rollback and trap handlers are executed asynchronously via EXIT/INT/TERM traps
 
 # --- Function: Comprehensive Physical Link Detection ---
 detect_port_status() {
@@ -301,7 +301,7 @@ start_tap() {
             for iface in "${CONFIGURED_IFACES[@]:-}"; do
                 [[ -n "${iface}" ]] && restore_interface_state "${iface}"
             done
-            [[ -n "${tmp_state}" ]] && rm -f "${tmp_state}" 2>/dev/null || true
+            if [[ -n "${tmp_state}" ]]; then rm -f "${tmp_state}" 2>/dev/null || true; fi
             if [[ ${STATE_FILE_CREATED} -eq 1 ]]; then
                 rm -f "${STATE_FILE}" 2>/dev/null || true
             fi
@@ -600,7 +600,7 @@ start_tap() {
 
         _close_lock_fds() {
             for lfd in ${HELD_LOCK_FDS[@]+"${HELD_LOCK_FDS[@]}"}; do
-                [[ -n "${lfd}" ]] && eval "exec ${lfd}>&-" 2>/dev/null || true
+                if [[ -n "${lfd}" ]]; then eval "exec ${lfd}>&-" 2>/dev/null || true; fi
             done
         }
 
@@ -711,7 +711,7 @@ start_tap() {
     trap - EXIT INT TERM HUP ERR
     release_lock
 
-    [[ -t 1 ]] && clear || true
+    if [[ -t 1 ]]; then clear || true; fi
     render_status_dashboard
 }
 

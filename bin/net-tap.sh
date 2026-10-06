@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # shellcheck shell=bash
-# shellcheck disable=SC2034,SC1091
+# shellcheck disable=SC2034,SC1091 # Global CLI configuration consumed across sourced lib/*.sh modules; dynamic library paths
+
 
 set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
@@ -55,7 +56,6 @@ main() {
     fi
     shift
 
-    # shellcheck disable=SC2034
     IFACE=""
     NETNS=""
     MODE="${DEFAULT_MODE:-passive}"

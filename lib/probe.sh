@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# shellcheck disable=SC2034,SC1091
 
 # lib/probe.sh - Orchestration wrapper for Net-Tap active probing
 
@@ -51,7 +50,6 @@ run_probe() {
     fi
 
     acquire_lock "${IFACE}"
-    # shellcheck disable=SC2064
     trap 'release_lock' EXIT INT TERM
 
     local audit_id="${PROBE_AUDIT_ID:-probe_$(date +%s)_$$}"

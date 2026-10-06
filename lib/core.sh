@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# shellcheck disable=SC2034
+# shellcheck disable=SC2034 # Exported configuration defaults and ANSI styling helpers consumed across net-tap scripts
 #
 # lib/core.sh - Core Logging, Configuration Defaults, and Dependency Verification
 #
@@ -178,13 +178,13 @@ load_state_file() {
         log_err "Security violation: State file '${sfile}' is empty or unreadable."
         return 1
     fi
-    # shellcheck disable=SC2016
+    # shellcheck disable=SC2016 # Intentional regex matching literal shell expansion syntax to prevent command injection
     if echo "${scontent}" | grep -qE '(\$\(|`|\${|;)'; then
         log_err "Security violation: State file '${sfile}' contains forbidden expansion characters."
         return 1
     fi
     local allowed_vars="IFACE|MODE|HW_TYPE|TIMESTAMP|NETNS|ROTATE_SIZE|ROTATE_COUNT|OUT_DIR|BPF_FILTER|PIDS_TCPDUMP|PIDS_DMESG|PIDS_IPMON|PCAP_FILES|DMESG_LOGS|LINK_LOGS|TCPDUMP_ERRS|CONFIGURED_IFACES|ORIG_[A-Za-z0-9_]+|PID_WATCHDOG|PID_AUTOSHUTDOWN"
-    # shellcheck disable=SC2016
+    # shellcheck disable=SC2016 # Intentional regex matching literal shell expansion syntax to prevent command injection
     if echo "${scontent}" | grep -qvE '^(#.*|[[:space:]]*|declare (--|-a|-A) ('"${allowed_vars}"')(=([0-9]+|"[^"$`\\]*"|\([][a-zA-Z0-9_./@:+=, "-]*\)))?)$'; then
         log_err "Security violation: State file '${sfile}' contains unauthorized expressions."
         return 1

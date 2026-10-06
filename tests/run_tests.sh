@@ -25,7 +25,7 @@ for cmd in ip tc awk grep mktemp; do
     fi
 done
 
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317 # Asynchronous trap cleanup handler invoked on EXIT/INT/TERM signals
 cleanup() {
     local exit_code=$?
     if [[ -n "${TMP_PRIV_DIR:-}" ]]; then rm -rf "${TMP_PRIV_DIR}" 2>/dev/null || true; fi

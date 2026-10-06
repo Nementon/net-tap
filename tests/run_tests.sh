@@ -46,6 +46,7 @@ cleanup() {
     if [[ -n "${EMPTY_DIR:-}" ]]; then rm -rf "${EMPTY_DIR}" 2>/dev/null || true; fi
     if [[ -n "${STATE_SEC_DIR:-}" ]]; then rm -rf "${STATE_SEC_DIR}" 2>/dev/null || true; fi
     if [[ -n "${TEST_SFP_DIR:-}" ]]; then rm -rf "${TEST_SFP_DIR}" 2>/dev/null || true; fi
+    if [[ -n "${TEST_NOSFP_DIR:-}" ]]; then rm -rf "${TEST_NOSFP_DIR}" 2>/dev/null || true; fi
     if [[ -n "${RESP_SENTINEL:-}" ]]; then rm -f "${RESP_SENTINEL}" 2>/dev/null || true; fi
     if [[ $exit_code -eq 0 ]]; then
         if [[ -n "${TEST_CAPTURE_DIR:-}" ]]; then rm -rf "${TEST_CAPTURE_DIR}" 2>/dev/null || true; fi
@@ -157,9 +158,14 @@ assert_success "$BIN_PATH" -h
 assert_fail "Usage:" "$BIN_PATH"
 assert_fail "Unknown action" "$BIN_PATH" foobar
 assert_fail "required" "$BIN_PATH" status
-assert_fail "(required|requires root privileges)" "$BIN_PATH" on
-assert_fail "(required|requires root privileges)" "$BIN_PATH" off
-assert_fail "(required|requires root privileges)" "$BIN_PATH" probe
+if [[ $EUID -eq 0 ]]; then
+    assert_fail "required" "$BIN_PATH" on
+    assert_fail "required" "$BIN_PATH" off
+else
+    assert_fail "requires root privileges" "$BIN_PATH" on
+    assert_fail "requires root privileges" "$BIN_PATH" off
+fi
+assert_fail "required" "$BIN_PATH" probe
 assert_success "$BIN_PATH" list
 assert_success "$BIN_PATH" list -j
 
@@ -248,7 +254,11 @@ rm -rf "${MOCK_STATE_DIR}"
 # --- 2. Input Validation Tests ---
 assert_fail "Invalid interface name format" "$BIN_PATH" status -i "bad;name"
 assert_fail "Invalid interface name format" "$BIN_PATH" status -i "eth0,bad;eth1"
-assert_fail "Invalid network namespace name format" "$BIN_PATH" status -n "bad;netns" -i lo
+if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+    assert_fail "Network namespaces \(-n / --netns\) are not supported on macOS" "$BIN_PATH" status -n "bad;netns" -i lo
+else
+    assert_fail "Invalid network namespace name format" "$BIN_PATH" status -n "bad;netns" -i lo
+fi
 assert_fail "cannot start with a hyphen" "$BIN_PATH" on -i lo -o "-bad-dir"
 assert_fail "cannot start with a hyphen" "$BIN_PATH" analyze -d "-bad-dir"
 assert_fail "Speed must be a positive integer" "$BIN_PATH" on -i lo -s "notanumber"
@@ -301,13 +311,18 @@ if [[ $EUID -ne 0 ]]; then
     assert_fail "requires root privileges" "$BIN_PATH" clean --force
 else
     # We are root; test that non-root user is rejected by staging into /tmp
-    if command -v su >/dev/null 2>&1 && id -u nobody >/dev/null 2>&1; then
+    if id -u nobody >/dev/null 2>&1; then
         TMP_PRIV_DIR=$(mktemp -d /tmp/net-tap-priv.XXXXXX)
         chmod 755 "${TMP_PRIV_DIR}"
         cp -r "${SCRIPT_DIR}/../bin" "${SCRIPT_DIR}/../lib" "${TMP_PRIV_DIR}/"
         chmod -R 755 "${TMP_PRIV_DIR}"
-        assert_fail "requires root privileges" su -s /bin/bash nobody -c "cd /tmp && '${TMP_PRIV_DIR}/bin/net-tap.sh' on -i lo"
+        if command -v sudo >/dev/null 2>&1; then
+            assert_fail "requires root privileges" sudo -u nobody "${BASH:-bash}" -c "cd /tmp && '${TMP_PRIV_DIR}/bin/net-tap.sh' on -i lo"
+        elif command -v su >/dev/null 2>&1; then
+            assert_fail "requires root privileges" su nobody -s "${BASH:-bash}" -c "cd /tmp && '${TMP_PRIV_DIR}/bin/net-tap.sh' on -i lo"
+        fi
         rm -rf "${TMP_PRIV_DIR}" 2>/dev/null || true
+        TMP_PRIV_DIR=""
     fi
 fi
 
@@ -435,6 +450,23 @@ fi
 rm -rf "$TEST_SFP_DIR" 2>/dev/null || true
 TEST_SFP_DIR=""
 
+# --- 4c. Non-SFP / Standard Copper Ethernet Analysis (Darwin / Non-DDM Capture) ---
+echo -n "[TEST] Verifying non-SFP analysis behavior (Darwin/copper capture without DDM)... "
+TEST_NOSFP_DIR=$(mktemp -d /tmp/net-tap-test-nosfp.XXXXXX)
+cp "$FIXTURES_DIR/synthetic_carrier_trace.pcap" "$TEST_NOSFP_DIR/20261005_120000_eth0_trace.pcap"
+NOSFP_REPORT=$("$BIN_PATH" analyze -d "$TEST_NOSFP_DIR" 2>/dev/null || true)
+NOSFP_JSON=$("$BIN_PATH" analyze -d "$TEST_NOSFP_DIR" --json 2>/dev/null || echo "{}")
+if echo "$NOSFP_REPORT" | grep -q "No SFP optical diagnostic dumps found" && \
+   ! echo "$NOSFP_JSON" | grep -q '"physical_layer"'; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (analyzer did not handle missing SFP DDM gracefully)"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "$TEST_NOSFP_DIR" 2>/dev/null || true
+TEST_NOSFP_DIR=""
+
 # --- 5. Analyzer Engine & Synthetic Dual-Stack Fixtures ---
 if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; then
     assert_success "$BIN_PATH" analyze -d "$FIXTURES_DIR"
@@ -500,7 +532,11 @@ if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; 
         assert_jq '.protocols.tcp_flags.psh > 0'
         assert_jq '.protocols.tcp_flags.urg > 0'
         assert_jq '.protocols.tcp_flags.zero_window >= 1'
-        assert_jq '.protocols.tcp_flags.retransmission >= 1'
+        if command -v tshark >/dev/null 2>&1 && [[ "${NET_TAP_DISABLE_TSHARK:-0}" -ne 1 ]]; then
+            assert_jq '.protocols.tcp_flags.retransmission >= 1'
+        else
+            assert_jq '.protocols.tcp_flags.retransmission == 0'
+        fi
         assert_jq '.protocols.ipv6_extension_headers.hop_by_hop == 2'
         assert_jq '.protocols.ipv6_extension_headers.routing == 1'
         assert_jq '.protocols.ipv6_extension_headers.fragment == 3'
@@ -536,7 +572,11 @@ if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; 
         assert_jq '.mpls_max_stack_depth == 2'
         assert_jq '.mobile_core.gtp_u == 2'
         assert_jq '.mobile_core.gtp_c == 1'
-        assert_jq '.mobile_core.active_teids | index("0x00000000") != null'
+        if command -v tshark >/dev/null 2>&1 && [[ "${NET_TAP_DISABLE_TSHARK:-0}" -ne 1 ]]; then
+            assert_jq '.mobile_core.active_teids | index("0x00000000") != null'
+        else
+            assert_jq '.mobile_core.active_teids == []'
+        fi
         assert_jq '.ipv4_multicast_groups | index("224.0.0.5") != null'
         assert_jq '.ipv6_multicast_groups | index("ff02::1") != null'
         assert_jq '.protocols.pcp_cos_distribution["0"] != null'

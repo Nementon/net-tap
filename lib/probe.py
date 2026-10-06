@@ -32,11 +32,19 @@ import time
 from typing import Optional, List, Tuple, Dict, Any, Sequence
 
 try:
-    from scapy.all import (
-        Ether, Dot1Q, ARP, IP, IPv6, ICMP, UDP, BOOTP, DHCP, TCP,
-        ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, ICMPv6ND_NA, Raw,
-        DNS, DNSQR, bind_layers
-    )
+    try:
+        from scapy.layers.l2 import Ether, Dot1Q, ARP
+        from scapy.layers.inet import IP, ICMP, UDP, TCP
+        from scapy.layers.inet6 import IPv6, ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, ICMPv6ND_NA
+        from scapy.layers.dhcp import BOOTP, DHCP
+        from scapy.layers.dns import DNS, DNSQR
+        from scapy.packet import Raw, bind_layers
+    except ImportError:
+        from scapy.all import (  # type: ignore[attr-defined]
+            Ether, Dot1Q, ARP, IP, IPv6, ICMP, UDP, BOOTP, DHCP, TCP,
+            ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, ICMPv6ND_NA, Raw,
+            DNS, DNSQR, bind_layers
+        )
     import scapy.layers.snmp as snmp
     bind_layers(Ether, Dot1Q, type=0x9100)
     bind_layers(Ether, Dot1Q, type=0x9200)
@@ -333,7 +341,7 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     ns = IPv6(src=src_ip_clean, dst=sn_mcast_ip, fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_NS(tgt=str(tgt_obj)) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                     ns_frame = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                     ns_proto = qinq_tpid if (qinq and len(qinq) == 2) else (0x8100 if vlan else ETH_P_IPV6)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ns_proto)) as r_sock:
+                    with socket.socket(AF_PACKET, socket.SOCK_RAW, socket.htons(ns_proto)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -405,7 +413,7 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     arp_req = ARP(op=1, hwsrc=src_mac, psrc=s_ip, pdst=str(tgt_obj))
                     arp_frame = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                     arp_proto = qinq_tpid if (qinq and len(qinq) == 2) else (0x8100 if vlan else ETH_P_ARP)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(arp_proto)) as r_sock:
+                    with socket.socket(AF_PACKET, socket.SOCK_RAW, socket.htons(arp_proto)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -466,7 +474,8 @@ def create_probe_socket(iface: str) -> Any:
                     self.sock = conf.L2socket(iface=interface)
 
                 def send(self, data: bytes) -> int:
-                    return self.sock.send(data)
+                    res = getattr(self.sock, "send")(data)
+                    return int(res) if res is not None else len(data)
 
                 def close(self) -> None:
                     if hasattr(self.sock, "close"):
@@ -487,7 +496,7 @@ def create_probe_socket(iface: str) -> Any:
             sys.exit(1)
     else:
         try:
-            sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+            sock = socket.socket(AF_PACKET, socket.SOCK_RAW)
             sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
             sock.bind((iface, 0))
             return sock

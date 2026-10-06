@@ -101,7 +101,7 @@ linux_setup_exec_cgroup() {
     local cgroup_base="/sys/fs/cgroup"
     local cgroup_dir="${cgroup_base}/net-tap/${session_id}"
 
-    if [[ ! -d "${cgroup_base}/cgroup.controllers" ]]; then
+    if [[ ! -f "${cgroup_base}/cgroup.controllers" ]]; then
         return 0
     fi
 

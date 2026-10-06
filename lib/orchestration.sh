@@ -1610,13 +1610,23 @@ run_exec() {
         runner_cmd+=(ip netns exec "${NETNS}")
     fi
 
-    # Handle privilege dropping if invoked via sudo
+    # Handle runner command assembly and privilege dropping if invoked via sudo
     if [[ "${EXEC_DROP_PRIVILEGES:-1}" -eq 1 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
         if command -v runuser >/dev/null 2>&1; then
-            runner_cmd+=(runuser -u "${SUDO_USER}" --)
+            runner_cmd+=(runuser -u "${SUDO_USER}" -- env)
         else
-            runner_cmd+=(sudo -u "${SUDO_USER}")
+            runner_cmd+=(sudo -u "${SUDO_USER}" env)
         fi
+        if [[ -n "${watermark_lib}" ]]; then
+            if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+                runner_cmd+=(DYLD_INSERT_LIBRARIES="${watermark_lib}" DYLD_FORCE_FLAT_NAMESPACE=1)
+            else
+                runner_cmd+=(LD_PRELOAD="${watermark_lib}")
+            fi
+        fi
+        runner_cmd+=(NETTAP_WATERMARK_MARK="${EXEC_MARK}" NETTAP_WATERMARK_DSCP="${dscp_val}")
+    else
+        runner_cmd+=(env)
         if [[ -n "${watermark_lib}" ]]; then
             if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
                 runner_cmd+=(DYLD_INSERT_LIBRARIES="${watermark_lib}" DYLD_FORCE_FLAT_NAMESPACE=1)

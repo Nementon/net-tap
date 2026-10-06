@@ -142,6 +142,19 @@ main() {
     PROBE_DEI=""
     PROBE_QINQ_TPID=""
 
+    # Exec Parameters
+    EXEC_CMD=()
+    EXEC_VLAN=""
+    EXEC_STATELESS_VLAN=0
+    EXEC_QINQ=""
+    EXEC_IP=""
+    EXEC_IP6=""
+    EXEC_PCP="7"
+    EXEC_DSCP="CS7"
+    EXEC_MARK="0x7a9"
+    EXEC_AUTO_BABY_GIANT=0
+    EXEC_DROP_PRIVILEGES=1
+
     SCRIPT_PATH=$(resolve_path "$0")
 
     while [[ $# -gt 0 ]]; do
@@ -316,11 +329,13 @@ main() {
             --vlan)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
                 PROBE_VLAN="$2"
+                EXEC_VLAN="$2"
                 shift 2
                 ;;
             --qinq)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
                 PROBE_QINQ="$2"
+                EXEC_QINQ="$2"
                 shift 2
                 ;;
             --auto-vlans)
@@ -345,6 +360,7 @@ main() {
             --pcp)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
                 PROBE_PCP="$2"
+                EXEC_PCP="$2"
                 shift 2
                 ;;
             --dei)
@@ -365,6 +381,43 @@ main() {
                 fi
                 PROBE_FALLBACK_MAC_MODE="$2"
                 shift 2
+                ;;
+            --stateless-vlan|--raw)
+                EXEC_STATELESS_VLAN=1
+                shift
+                ;;
+            --auto-baby-giant)
+                EXEC_AUTO_BABY_GIANT=1
+                shift
+                ;;
+            --no-drop-privileges)
+                EXEC_DROP_PRIVILEGES=0
+                shift
+                ;;
+            --ip)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                EXEC_IP="$2"
+                shift 2
+                ;;
+            --ip6)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                EXEC_IP6="$2"
+                shift 2
+                ;;
+            --mark)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                EXEC_MARK="$2"
+                shift 2
+                ;;
+            --dscp)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                EXEC_DSCP="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                EXEC_CMD=("$@")
+                break
                 ;;
             --force)
                 FORCE_CLEAN=1
@@ -561,6 +614,47 @@ main() {
         fi
     fi
 
+    if [[ "${ACTION}" == "exec" ]]; then
+        if [[ -z "${IFACE}" ]]; then
+            log_err "Interface (-i) is required for exec command."
+            exit 1
+        fi
+        if [[ ${#EXEC_CMD[@]} -eq 0 ]]; then
+            log_err "Command to execute must be specified after '--' delimiter (e.g., net-tap exec -i <iface> -- <cmd> [args...])."
+            exit 1
+        fi
+        if [[ -n "${EXEC_VLAN}" ]]; then
+            if ! [[ "${EXEC_VLAN}" =~ ^[0-9]+$ ]] || [[ $((10#${EXEC_VLAN})) -lt 1 || $((10#${EXEC_VLAN})) -gt 4094 ]]; then
+                log_err "VLAN ID must be an integer between 1 and 4094 (got '${EXEC_VLAN}')."
+                exit 1
+            fi
+        fi
+        if [[ -n "${EXEC_QINQ}" ]]; then
+            if ! [[ "${EXEC_QINQ}" =~ ^[0-9]+,[0-9]+$ ]]; then
+                log_err "QinQ tags must be in format 's_tag,c_tag' (e.g., 100,200)."
+                exit 1
+            fi
+            local eq_s="${EXEC_QINQ%%,*}" eq_c="${EXEC_QINQ##*,}"
+            local eq_s_dec=$((10#$eq_s)) eq_c_dec=$((10#$eq_c))
+            if [[ "$eq_s_dec" -lt 1 || "$eq_s_dec" -gt 4094 || "$eq_c_dec" -lt 1 || "$eq_c_dec" -gt 4094 ]]; then
+                log_err "QinQ tags must be integers between 1 and 4094 (got ${eq_s},${eq_c})."
+                exit 1
+            fi
+        fi
+        if [[ -n "${EXEC_PCP}" ]]; then
+            if ! [[ "${EXEC_PCP}" =~ ^[0-7]$ ]]; then
+                log_err "PCP must be an integer between 0 and 7."
+                exit 1
+            fi
+        fi
+        if [[ -n "${EXEC_IP}" ]]; then
+            if ! [[ "${EXEC_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
+                log_err "Invalid IP address format: '${EXEC_IP}'."
+                exit 1
+            fi
+        fi
+    fi
+
     if [[ -n "${BPF_FILTER}" ]]; then
         local base_filter="${BPF_FILTER}"
         local expanded_clauses=("(${base_filter})")
@@ -631,8 +725,8 @@ main() {
                             exit 1
                         fi
                         STATE_FILE="$f"
-                        # Update IFACE to full multi-interface list for stop/status, but preserve single target for probe
-                        if [[ "${ACTION}" != "probe" ]]; then
+                        # Update IFACE to full multi-interface list for stop/status, but preserve single target for probe and exec
+                        if [[ "${ACTION}" != "probe" && "${ACTION}" != "exec" ]]; then
                             IFACE="$ifaces_part"
                         fi
                         if [[ -z "${safe_netns}" && -n "${parsed_netns}" ]]; then
@@ -662,6 +756,9 @@ main() {
             ;;
         probe)
             run_probe
+            ;;
+        exec)
+            run_exec
             ;;
         list)
             list_sessions

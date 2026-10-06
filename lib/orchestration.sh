@@ -1379,3 +1379,279 @@ clean_sessions() {
 
     log_ok "Cleanup complete: ${cleaned_sessions} session(s) detached, ${cleaned_locks} lock file(s) purged."
 }
+
+# --- Function: Arbitrary Command Execution Wrapper with Watermarking & VLAN Tagging ---
+
+_exec_supervisor_loop() {
+    local -a target_runner=("$@")
+    local child_pid=""
+    local child_exit=0
+
+    # Ensure monitor mode is disabled to permit process group management
+    set +m
+
+    _forward_signal() {
+        local sig="$1"
+        if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+            kill "-${sig}" "-${child_pid}" 2>/dev/null || kill "-${sig}" "${child_pid}" 2>/dev/null || true
+        fi
+    }
+
+    trap '_forward_signal INT' INT
+    trap '_forward_signal TERM' TERM
+    trap '_forward_signal HUP' HUP
+    trap '_forward_signal QUIT' QUIT
+
+    # Launch child runner in dedicated process group if setsid is available
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "${target_runner[@]}" &
+        child_pid=$!
+    else
+        "${target_runner[@]}" &
+        child_pid=$!
+    fi
+
+    # Attach child to cgroup if directory exists
+    if [[ -n "${cgroup_dir:-}" && -f "${cgroup_dir}/cgroup.procs" ]]; then
+        echo "${child_pid}" > "${cgroup_dir}/cgroup.procs" 2>/dev/null || true
+    fi
+
+    # Supervise child execution and wait for completion
+    wait "${child_pid}" 2>/dev/null || child_exit=$?
+
+    # Clear traps
+    trap - INT TERM HUP QUIT
+
+    if [[ ${child_exit} -gt 128 ]]; then
+        local term_sig=$((child_exit - 128))
+        log_warn "Target command terminated by signal ${term_sig}."
+    fi
+
+    return "${child_exit}"
+}
+
+run_exec() {
+    if [[ -z "${IFACE}" ]]; then
+        log_err "Interface (-i) is required for exec command."
+        exit 1
+    fi
+
+    if [[ ${#EXEC_CMD[@]} -eq 0 ]]; then
+        log_err "Command to execute must be specified after '--' delimiter (e.g., net-tap exec -i <iface> -- <cmd> [args...])."
+        exit 1
+    fi
+
+    if [[ ! -f "${STATE_FILE}" ]]; then
+        log_err "No active tap session found on '${IFACE}'."
+        exit 1
+    fi
+
+    load_state_file "${STATE_FILE}"
+
+    if [[ "${MODE:-passive}" != "active" ]]; then
+        log_err "Tap session on '${IFACE}' is running in PASSIVE mode (zero-egress stealth). Egress traffic cannot be transmitted. Start session with '--mode active' to permit watermarked execution."
+        exit 1
+    fi
+
+    require_root
+
+    local port_info
+    port_info=$(detect_port_status "${IFACE}")
+    local port_carrier="${port_info%%|*}"
+    if [[ "${port_carrier}" != "ACTIVE" ]] && [[ "${FORCE_CLEAN:-0}" -ne 1 ]]; then
+        log_warn "Carrier link on '${IFACE}' is ${port_carrier}. Egress frames may not reach physical wire."
+    fi
+
+    local exec_session_id
+    exec_session_id="exec_${$}_$(date +%s)"
+    local orig_mtu=""
+    local overhead=4
+    if [[ -n "${EXEC_QINQ:-}" ]]; then
+        overhead=8
+    fi
+
+    # Baby Giant MTU expansion
+    if [[ "${EXEC_AUTO_BABY_GIANT:-0}" -eq 1 ]]; then
+        if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+            orig_mtu=$(darwin_adjust_baby_giant_mtu "${IFACE}" "${overhead}")
+        else
+            orig_mtu=$(linux_adjust_baby_giant_mtu "${IFACE}" "${overhead}")
+        fi
+        if [[ -n "${orig_mtu}" ]]; then
+            log_info "Expanded parent physical interface '${IFACE}' MTU from ${orig_mtu} to $((1500 + overhead)) (Baby Giant envelope)."
+        fi
+    fi
+
+    # Locate Interposition Shared Library
+    local watermark_lib=""
+    if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+        if [[ -f "${LIB_DIR}/libnettap_watermark.dylib" ]]; then
+            watermark_lib="${LIB_DIR}/libnettap_watermark.dylib"
+        elif [[ -f "${SCRIPT_DIR:-.}/../lib/libnettap_watermark.dylib" ]]; then
+            watermark_lib="${SCRIPT_DIR:-.}/../lib/libnettap_watermark.dylib"
+        fi
+    else
+        if [[ -f "${LIB_DIR}/libnettap_watermark.so" ]]; then
+            watermark_lib="${LIB_DIR}/libnettap_watermark.so"
+        elif [[ -f "${SCRIPT_DIR:-.}/../lib/libnettap_watermark.so" ]]; then
+            watermark_lib="${SCRIPT_DIR:-.}/../lib/libnettap_watermark.so"
+        fi
+    fi
+
+    # Convert DSCP to integer TOS value
+    local dscp_val=56
+    case "${EXEC_DSCP^^}" in
+        CS0|BE) dscp_val=0 ;;
+        CS1) dscp_val=8 ;;
+        CS2) dscp_val=16 ;;
+        CS3) dscp_val=24 ;;
+        CS4) dscp_val=32 ;;
+        CS5) dscp_val=40 ;;
+        CS6) dscp_val=48 ;;
+        CS7) dscp_val=56 ;;
+        0X*) dscp_val=$((EXEC_DSCP)) ;;
+        [0-9]*) dscp_val=$((10#${EXEC_DSCP})) ;;
+    esac
+
+    # Datapath Provisioning
+    local cgroup_dir=""
+    local exec_netns=""
+    local vlan_if=""
+    local datapath_profile="host"
+
+    if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+        datapath_profile="darwin_pf"
+        if [[ -n "${EXEC_VLAN:-}" ]]; then
+            vlan_if=$(darwin_setup_exec_vlan "${IFACE}" "${EXEC_VLAN}")
+            log_ok "Provisioned macOS virtual 802.1Q interface '${vlan_if}' bound to '${IFACE}' (VLAN ${EXEC_VLAN})."
+        fi
+        darwin_setup_exec_pf_group "${IFACE}" "_nettap_active" "${vlan_if}"
+    else
+        # Linux Datapath
+        local target_uid="${SUDO_UID:-0}" target_gid="${SUDO_GID:-0}"
+        if [[ "${EXEC_DROP_PRIVILEGES:-1}" -eq 0 ]]; then
+            target_uid=0
+            target_gid=0
+        fi
+        cgroup_dir=$(linux_setup_exec_cgroup "${exec_session_id}" "${target_uid}" "${target_gid}")
+        linux_setup_exec_netfilter "${IFACE}" "${exec_session_id}" "${EXEC_MARK}" "${EXEC_DSCP}"
+
+        if [[ -n "${EXEC_QINQ:-}" ]]; then
+            datapath_profile="stateless_tc"
+            local s_tag="${EXEC_QINQ%%,*}" c_tag="${EXEC_QINQ##*,}"
+            linux_setup_exec_vlan_tc "${IFACE}" "" "${EXEC_PCP}" "${EXEC_MARK}" "${s_tag}" "${c_tag}"
+            log_ok "Configured stateless QinQ tc filter on '${IFACE}' (S-Tag: ${s_tag}, C-Tag: ${c_tag}, PCP: ${EXEC_PCP})."
+        elif [[ -n "${EXEC_VLAN:-}" ]]; then
+            if [[ "${EXEC_STATELESS_VLAN:-0}" -eq 1 ]]; then
+                datapath_profile="stateless_tc"
+                linux_setup_exec_vlan_tc "${IFACE}" "${EXEC_VLAN}" "${EXEC_PCP}" "${EXEC_MARK}"
+                log_ok "Configured stateless 802.1Q tc filter on '${IFACE}' (VLAN: ${EXEC_VLAN}, PCP: ${EXEC_PCP})."
+            else
+                datapath_profile="stateful_netns"
+                exec_netns=$(linux_setup_exec_vlan_netns "${IFACE}" "${EXEC_VLAN}" "${exec_session_id}" "${EXEC_IP:-}" "${EXEC_IP6:-}")
+                log_ok "Provisioned ephemeral network namespace '${exec_netns}' with sub-interface '${IFACE}.${EXEC_VLAN}' (VLAN ${EXEC_VLAN})."
+            fi
+        fi
+    fi
+
+    local _cleaned=0
+    _cleanup_exec() {
+        if [[ ${_cleaned} -eq 1 ]]; then
+            return 0
+        fi
+        _cleaned=1
+
+        if [[ -n "${orig_mtu}" ]]; then
+            if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+                darwin_restore_baby_giant_mtu "${IFACE}" "${orig_mtu}"
+            else
+                linux_restore_baby_giant_mtu "${IFACE}" "${orig_mtu}"
+            fi
+        fi
+        if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+            if [[ -n "${vlan_if}" ]]; then
+                darwin_teardown_exec_vlan "${vlan_if}"
+            fi
+            darwin_teardown_exec_pf_group "${IFACE}"
+        else
+            if [[ -n "${exec_netns}" ]]; then
+                linux_teardown_exec_vlan_netns "${exec_netns}"
+            fi
+            if [[ "${EXEC_STATELESS_VLAN:-0}" -eq 1 || -n "${EXEC_QINQ:-}" ]]; then
+                linux_teardown_exec_vlan_tc "${IFACE}" "${EXEC_MARK}"
+            fi
+            linux_teardown_exec_netfilter "${IFACE}" "${exec_session_id}"
+            linux_teardown_exec_cgroup "${exec_session_id}"
+        fi
+    }
+    trap '_cleanup_exec' EXIT INT TERM HUP QUIT
+
+    # Configure Environment for Tool Runner
+    export NETTAP_WATERMARK_MARK="${EXEC_MARK}"
+    export NETTAP_WATERMARK_DSCP="${dscp_val}"
+    if [[ -n "${vlan_if}" ]]; then
+        export NETTAP_WATERMARK_BOUND_IF="${vlan_if}"
+    fi
+
+    if [[ -n "${watermark_lib}" ]]; then
+        if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+            export DYLD_INSERT_LIBRARIES="${watermark_lib}${DYLD_INSERT_LIBRARIES:+:${DYLD_INSERT_LIBRARIES}}"
+            export DYLD_FORCE_FLAT_NAMESPACE=1
+        else
+            export LD_PRELOAD="${watermark_lib}${LD_PRELOAD:+:${LD_PRELOAD}}"
+        fi
+    fi
+
+    # Build runner invocation
+    local -a runner_cmd=()
+    if [[ -n "${exec_netns}" ]]; then
+        runner_cmd+=(ip netns exec "${exec_netns}")
+    elif [[ -n "${NETNS:-}" ]]; then
+        runner_cmd+=(ip netns exec "${NETNS}")
+    fi
+
+    # Handle privilege dropping if invoked via sudo
+    if [[ "${EXEC_DROP_PRIVILEGES:-1}" -eq 1 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        if command -v runuser >/dev/null 2>&1; then
+            runner_cmd+=(runuser -u "${SUDO_USER}" --)
+        else
+            runner_cmd+=(sudo -u "${SUDO_USER}")
+        fi
+        if [[ -n "${watermark_lib}" ]]; then
+            if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+                runner_cmd+=(DYLD_INSERT_LIBRARIES="${watermark_lib}" DYLD_FORCE_FLAT_NAMESPACE=1)
+            else
+                runner_cmd+=(LD_PRELOAD="${watermark_lib}")
+            fi
+        fi
+        runner_cmd+=(NETTAP_WATERMARK_MARK="${EXEC_MARK}" NETTAP_WATERMARK_DSCP="${dscp_val}")
+    fi
+
+    runner_cmd+=("${EXEC_CMD[@]}")
+
+    log_info "Executing wrapped command under datapath profile '${datapath_profile}': ${EXEC_CMD[*]}"
+
+    local child_exit=0
+    _exec_supervisor_loop "${runner_cmd[@]}" || child_exit=$?
+
+    # Record Telemetry Audit
+    if [[ -n "${OUT_DIR:-}" && -d "${OUT_DIR}" ]]; then
+        local audit_log="${OUT_DIR}/exec_audit.jsonl"
+        local vlan_val="${EXEC_VLAN:-null}"
+        local qinq_val="${EXEC_QINQ:+$(printf '"%s"' "${EXEC_QINQ}")}"
+        qinq_val="${qinq_val:-null}"
+        local cmd_str="${EXEC_CMD[*]}"
+        printf '{"timestamp":"%s","command":"%s","exit_code":%d,"datapath_profile":"%s","vlan":%s,"qinq":%s}\n' \
+            "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")" \
+            "${cmd_str//\"/\\\"}" \
+            "${child_exit}" \
+            "${datapath_profile}" \
+            "${vlan_val}" \
+            "${qinq_val}" >> "${audit_log}" 2>/dev/null || true
+    fi
+
+    _cleanup_exec
+    trap - EXIT INT TERM HUP QUIT
+
+    exit "${child_exit}"
+}

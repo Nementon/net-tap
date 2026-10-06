@@ -279,6 +279,7 @@ start_tap() {
     local PID_AUTOSHUTDOWN=""
     local PID_WATCHDOG=""
 
+    # shellcheck disable=SC2317,SC2329 # Asynchronous cleanup handler invoked via EXIT trap
     cleanup_on_fail() {
         if [[ ${SETUP_SUCCESS} -eq 0 ]]; then
             log_warn "Setup failed halfway! Rolling back interface state to prevent disruption..."
@@ -836,6 +837,7 @@ stop_tap() {
 
     IFS=',' read -ra IFACES_ARR <<< "${IFACE}"
 
+    # shellcheck disable=SC2317,SC2329 # Asynchronous cleanup handler invoked via INT/TERM/HUP/EXIT trap
     cleanup_on_interrupt() {
         trap - EXIT INT TERM HUP
         log_err "Received interrupt signal! Forcing emergency interface reset..."

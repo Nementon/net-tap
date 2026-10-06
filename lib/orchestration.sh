@@ -132,12 +132,16 @@ _autoshutdown_worker() {
     local dur="$1" ifc="$2" ns="${3:-}" script="${4:-$(readlink -f "$0")}" stfile="$5"
     local sleep_pid=""
     trap '[[ -n "${sleep_pid}" ]] && kill -TERM "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT HUP EXIT
-    for fd_path in /proc/self/fd/*; do
-        local fd="${fd_path##*/}"
-        if [[ "$fd" =~ ^[0-9]+$ ]] && [[ "$fd" -ge 3 ]]; then
-            eval "exec ${fd}>&-" 2>/dev/null || true
-        fi
-    done
+    local fd_dir="/dev/fd"
+    [[ -d "/proc/self/fd" ]] && fd_dir="/proc/self/fd"
+    if [[ -d "${fd_dir}" ]]; then
+        for fd_path in "${fd_dir}"/*; do
+            local fd="${fd_path##*/}"
+            if [[ "$fd" =~ ^[0-9]+$ ]] && [[ "$fd" -ge 3 ]]; then
+                eval "exec ${fd}>&-" 2>/dev/null || true
+            fi
+        done
+    fi
     sleep "${dur}" &
     sleep_pid=$!
     wait "${sleep_pid}" 2>/dev/null || true
@@ -154,12 +158,16 @@ _disk_watchdog_worker() {
     local sleep_pid=""
     trap '[[ -n "${sleep_pid}" ]] && kill -TERM "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT EXIT
     trap '' HUP
-    for fd_path in /proc/self/fd/*; do
-        local fd="${fd_path##*/}"
-        if [[ "$fd" =~ ^[0-9]+$ ]] && [[ "$fd" -ge 3 ]]; then
-            eval "exec ${fd}>&-" 2>/dev/null || true
-        fi
-    done
+    local fd_dir="/dev/fd"
+    [[ -d "/proc/self/fd" ]] && fd_dir="/proc/self/fd"
+    if [[ -d "${fd_dir}" ]]; then
+        for fd_path in "${fd_dir}"/*; do
+            local fd="${fd_path##*/}"
+            if [[ "$fd" =~ ^[0-9]+$ ]] && [[ "$fd" -ge 3 ]]; then
+                eval "exec ${fd}>&-" 2>/dev/null || true
+            fi
+        done
+    fi
 
     # Allow initial grace period for atomic state serialization
     local init_wait=0
@@ -678,7 +686,7 @@ start_tap() {
         local wait_tcpdump=0
         local tcpdump_alive=0
         while [[ $wait_tcpdump -lt 50 ]]; do
-            if kill -0 "${PID_TCPDUMP}" 2>/dev/null && grep -q "tcpdump" "/proc/${PID_TCPDUMP}/comm" 2>/dev/null; then
+            if kill -0 "${PID_TCPDUMP}" 2>/dev/null && [[ "$(get_proc_comm "${PID_TCPDUMP}")" =~ tcpdump ]]; then
                 tcpdump_alive=1
                 break
             fi
@@ -862,8 +870,8 @@ stop_tap() {
         [[ -z "${pid}" ]] && continue
         if kill -0 "${pid}" 2>/dev/null; then
             local p_comm
-            p_comm=$(cat "/proc/${pid}/comm" 2>/dev/null || echo "")
-            if [[ "${p_comm}" == "tcpdump" ]]; then
+            p_comm=$(get_proc_comm "${pid}")
+            if [[ "${p_comm}" =~ tcpdump ]]; then
                 kill -SIGTERM "${pid}" 2>/dev/null || true
             fi
         fi
@@ -1028,7 +1036,7 @@ status_tap() {
         local running_pids=()
         for pid in "${PIDS_TCPDUMP[@]:-}"; do
             [[ -z "${pid}" ]] && continue
-            if [[ -d "/proc/${pid}" ]] && grep -q "tcpdump" "/proc/${pid}/comm" 2>/dev/null; then
+            if kill -0 "${pid}" 2>/dev/null && [[ "$(get_proc_comm "${pid}")" =~ tcpdump ]]; then
                 running_pids+=("${pid}")
             fi
         done
@@ -1090,7 +1098,7 @@ list_sessions() {
 
         local is_alive=0
         if [[ -n "${s_pid}" && "${s_pid}" =~ ^[0-9]+$ ]]; then
-            if [[ -d "/proc/${s_pid}" ]] || kill -0 "${s_pid}" 2>/dev/null; then
+            if kill -0 "${s_pid}" 2>/dev/null; then
                 is_alive=1
             elif [[ -n "${s_netns}" ]] && ip netns exec "${s_netns}" kill -0 "${s_pid}" 2>/dev/null; then
                 is_alive=1

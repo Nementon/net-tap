@@ -5,14 +5,31 @@ LIBDIR ?= $(PREFIX)/lib/net-tap
 export PYTHONDONTWRITEBYTECODE = 1
 export PATH := $(HOME)/.local/bin:$(PATH)
 
-all: lint
+UNAME_S := $(shell uname -s)
+CC ?= gcc
 
-install:
+ifeq ($(UNAME_S),Linux)
+WATERMARK_LIB = lib/libnettap_watermark.so
+CFLAGS_SHARED = -shared -fPIC -Wl,-soname,libnettap_watermark.so
+LDFLAGS_SHARED = -ldl -lpthread
+else ifeq ($(UNAME_S),Darwin)
+WATERMARK_LIB = lib/libnettap_watermark.dylib
+CFLAGS_SHARED = -dynamiclib -fPIC
+LDFLAGS_SHARED = -ldl -lpthread
+endif
+
+all: $(WATERMARK_LIB) lint
+
+$(WATERMARK_LIB): lib/libnettap_watermark.c
+	$(CC) $(CFLAGS) -O2 -Wall -Wextra $(CFLAGS_SHARED) $< -o $@ $(LDFLAGS_SHARED)
+
+install: $(WATERMARK_LIB)
 	install -d $(DESTDIR)$(BINDIR)
 	install -d $(DESTDIR)$(LIBDIR)
 	install -m 755 bin/net-tap.sh $(DESTDIR)$(BINDIR)/net-tap
 	install -m 644 lib/*.sh $(DESTDIR)$(LIBDIR)/
 	install -m 755 lib/*.py $(DESTDIR)$(LIBDIR)/
+	install -m 755 $(WATERMARK_LIB) $(DESTDIR)$(LIBDIR)/
 
 installcheck:
 	@echo "Checking installed net-tap binary..."
@@ -55,7 +72,7 @@ fixtures:
 		exit 1; \
 	fi
 
-test: lint fixtures
+test: $(WATERMARK_LIB) lint fixtures
 	@echo "Running Python probe mock unit tests..."
 	@python3 -B tests/test_probe_unit.py
 	@echo "Running automated compliance and unit tests..."
@@ -63,12 +80,13 @@ test: lint fixtures
 
 SUDO ?= $(shell if [ "$$(id -u)" -ne 0 ]; then echo sudo; fi)
 
-test-integration: lint fixtures
+test-integration: $(WATERMARK_LIB) lint fixtures
 	@echo "Running integration tests (requires root)..."
 	@$(SUDO) PYTHONDONTWRITEBYTECODE=1 bash tests/run_tests.sh
 
 clean:
 	@rm -rf lib/__pycache__ tests/__pycache__
+	@rm -f lib/*.so lib/*.dylib
 	@find /tmp -maxdepth 1 -user "$$(id -u)" \( -name "net-tap-*" -o -name "net_tap_*" -o -name "wpa_*" \) -exec rm -rf {} + 2>/dev/null || true
 
 .PHONY: all install installcheck uninstall lint fixtures test test-integration clean

@@ -16,4 +16,6 @@ captures/
 __pycache__/
 *.py[cod]
 .coverage
+*.so
+*.dylib
 .pytest_cache/

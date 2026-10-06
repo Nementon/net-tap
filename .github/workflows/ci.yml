@@ -41,13 +41,13 @@ jobs:
             tshark \
             iptables \
             procps \
-            wpa_supplicant \
+            wpasupplicant \
             python3-pip \
             python3-scapy \
             python3-jsonschema \
             python3-pytest \
             python3-pytest-cov
-          pip3 install --break-system-packages ruff mypy
+          pip3 install --break-system-packages ruff mypy 2>/dev/null || pip3 install ruff mypy
 
       - name: Run ShellCheck & Unprivileged Tests
         run: |

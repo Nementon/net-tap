@@ -16,7 +16,15 @@ try:
     )
     from scapy.layers.inet6 import ICMPv6MLReport2, ICMPv6MLDMultAddrRec
     from scapy.layers.tls.all import TLS, TLSClientHello, TLS_Ext_ServerName, ServerName
-    from scapy.layers.sctp import SCTP, SCTPChunkHeartbeatReq, SCTPChunkParamHeartbeatInfo
+    from scapy.layers.sctp import SCTP, SCTPChunkHeartbeatReq
+    try:
+        from scapy.layers.sctp import SCTPChunkParamHeartbeatInfo
+    except ImportError:
+        # In Scapy <= 2.4.x, the class was misspelled as SCTPChunkParamHearbeatInfo
+        try:
+            from scapy.layers.sctp import SCTPChunkParamHearbeatInfo as SCTPChunkParamHeartbeatInfo
+        except ImportError:
+            SCTPChunkParamHeartbeatInfo = None
     from scapy.contrib.isis import ISIS_CommonHdr, ISIS_P2P_Hello
     from scapy.contrib.ospf import OSPF_Hdr, OSPF_Hello, OSPF_LSUpd, OSPF_Router_LSA, OSPFv3_Hdr, OSPFv3_Hello
 except ImportError as err:
@@ -180,7 +188,10 @@ packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src=
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::100", dst="2001:db8:beef::1", nh=132) / Raw(load=sctp_raw))
 
 # 9c. SCTP with HEARTBEAT chunk (Chunk Type 4)
-packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src="192.168.10.1", dst="192.168.10.2") / SCTP(sport=80, dport=80) / SCTPChunkHeartbeatReq(params=[SCTPChunkParamHeartbeatInfo(data=b"test_hb_")]))
+if SCTPChunkParamHeartbeatInfo is not None:
+    packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src="192.168.10.1", dst="192.168.10.2") / SCTP(sport=80, dport=80) / SCTPChunkHeartbeatReq(params=[SCTPChunkParamHeartbeatInfo(data=b"test_hb_")]))
+else:
+    packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src="192.168.10.1", dst="192.168.10.2") / SCTP(sport=80, dport=80) / SCTPChunkHeartbeatReq())
 
 # 10. Overlay: VXLAN (UDP 4789)
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src="172.16.1.1", dst="172.16.1.2") / UDP(sport=50000, dport=4789) / VXLAN(vni=5001) / Ether(src="02:00:00:00:00:11", dst="02:00:00:00:00:22") / IP(src="192.168.100.1", dst="192.168.100.2") / TCP(sport=8080, dport=80, flags="S"))

@@ -550,7 +550,8 @@ class TestProbeUnit(unittest.TestCase):
             self.assertEqual(gw_mac, "00:aa:bb:cc:dd:ee")
 
         proc_arp = "IP address       HW type     Flags       HW address            Mask     Device\n192.168.1.200    0x1         0x2         00:50:56:c0:00:08     *        eth_arp\n"
-        with patch("os.path.exists", return_value=True), \
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
+             patch("os.path.exists", return_value=True), \
              patch("builtins.open", unittest.mock.mock_open(read_data=proc_arp)):
             mac = probe.resolve_dst_mac("eth_arp", "192.168.1.200", is_v6=False)
             self.assertEqual(mac, "00:50:56:c0:00:08")
@@ -583,15 +584,16 @@ class TestProbeUnit(unittest.TestCase):
 
     def test_create_probe_socket_permission_and_os_error(self):
         """Test create_probe_socket error handling for PermissionError and OSError."""
-        with patch("socket.socket", side_effect=PermissionError("Permission denied")):
-            with self.assertRaises(SystemExit) as cm:
-                probe.create_probe_socket("eth0")
-            self.assertEqual(cm.exception.code, 1)
+        with patch("sys.stderr", new_callable=io.StringIO):
+            with patch("socket.socket", side_effect=PermissionError("Permission denied")):
+                with self.assertRaises(SystemExit) as cm:
+                    probe.create_probe_socket("eth0")
+                self.assertEqual(cm.exception.code, 1)
 
-        with patch("socket.socket", side_effect=OSError("Device not configured")):
-            with self.assertRaises(SystemExit) as cm:
-                probe.create_probe_socket("eth0")
-            self.assertEqual(cm.exception.code, 1)
+            with patch("socket.socket", side_effect=OSError("Device not configured")):
+                with self.assertRaises(SystemExit) as cm:
+                    probe.create_probe_socket("eth0")
+                self.assertEqual(cm.exception.code, 1)
 
     @patch("probe.create_probe_socket")
     def test_main_tcp_syn_ipv6(self, mock_create_sock):

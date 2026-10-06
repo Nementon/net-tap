@@ -140,7 +140,7 @@ def get_link_local_ipv6(iface: str) -> str:
         octets = [int(x, 16) for x in mac_str.split(":")]
         octets[0] ^= 0x02  # Invert universal/local bit
         eui64 = f"{octets[0]:02x}{octets[1]:02x}:{octets[2]:02x}ff:fe{octets[3]:02x}:{octets[4]:02x}{octets[5]:02x}"
-        return f"fe80::{eui64}"
+        return ipaddress.IPv6Address(f"fe80::{eui64}").compressed
     except Exception:
         return "fe80::1"
 
@@ -437,6 +437,18 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
         return "ff:ff:ff:ff:ff:ff" if (not is_v6 or fallback_mode == "broadcast") else "33:33:00:00:00:01"
 
 
+def _make_dot1q(vlan: int, prio: int = 0, dei: int = 0, eth_type: Optional[int] = None) -> Dot1Q:
+    """Instantiate Dot1Q compatible across Scapy versions without dei/id deprecation warnings."""
+    kwargs: Dict[str, Any] = {"vlan": vlan, "prio": prio}
+    if eth_type is not None:
+        kwargs["type"] = eth_type
+    if "dei" in [f.name for f in Dot1Q.fields_desc]:
+        kwargs["dei"] = dei
+    else:
+        kwargs["id"] = dei
+    return Dot1Q(**kwargs)
+
+
 def wrap_l2(payload: Packet, dst_mac: str, src_mac: str,
             vlan: Optional[int] = None, qinq: Optional[Tuple[int, int]] = None,
             eth_type: Optional[int] = None, pcp: int = 0, dei: int = 0,
@@ -444,10 +456,10 @@ def wrap_l2(payload: Packet, dst_mac: str, src_mac: str,
     """Encapsulate payload in Ethernet, optional 802.1Q, or 802.1ad QinQ."""
     if qinq and len(qinq) == 2:
         s_vid, c_vid = qinq
-        inner_dot1q = Dot1Q(vlan=c_vid, prio=pcp, id=dei, type=eth_type) if eth_type else Dot1Q(vlan=c_vid, prio=pcp, id=dei)
-        return Ether(src=src_mac, dst=dst_mac, type=qinq_tpid) / Dot1Q(vlan=s_vid, prio=pcp, id=dei, type=0x8100) / inner_dot1q / payload
+        inner_dot1q = _make_dot1q(vlan=c_vid, prio=pcp, dei=dei, eth_type=eth_type)
+        return Ether(src=src_mac, dst=dst_mac, type=qinq_tpid) / _make_dot1q(vlan=s_vid, prio=pcp, dei=dei, eth_type=0x8100) / inner_dot1q / payload
     elif vlan is not None and vlan > 0:
-        tag = Dot1Q(vlan=vlan, prio=pcp, id=dei, type=eth_type) if eth_type else Dot1Q(vlan=vlan, prio=pcp, id=dei)
+        tag = _make_dot1q(vlan=vlan, prio=pcp, dei=dei, eth_type=eth_type)
         return Ether(src=src_mac, dst=dst_mac, type=0x8100) / tag / payload
     else:
         if eth_type:

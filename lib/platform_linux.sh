@@ -70,6 +70,10 @@ platform_stat_nlinks() {
     stat -c "%h" "$1" 2>/dev/null || echo "0"
 }
 
+platform_stat_mtime() {
+    stat -c "%Y" "$1" 2>/dev/null || echo "0"
+}
+
 platform_proc_starttime() {
     local pid="$1"
     [[ -z "${pid}" || ! -d "/proc/${pid}" ]] && return 0

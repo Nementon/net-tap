@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -968,6 +969,26 @@ class TestProbeUnit(unittest.TestCase):
                 pass
             mock_l2_sock.close.assert_called()
 
+    def test_darwin_bpf_socket_permission_denied(self):
+        """Test DarwinBPFSocket handling of PermissionError when opening /dev/bpf."""
+        with patch.object(probe, "IS_DARWIN", True), \
+             patch("scapy.config.conf.L2socket", side_effect=PermissionError("Permission denied")), \
+             patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            with self.assertRaises(SystemExit) as cm:
+                probe.create_probe_socket("en0")
+            self.assertEqual(cm.exception.code, 1)
+            self.assertIn("BPF device access on macOS requires root privileges", mock_stderr.getvalue())
+
+    def test_darwin_bpf_socket_device_exhaustion(self):
+        """Test DarwinBPFSocket handling of device exhaustion or OS error."""
+        with patch.object(probe, "IS_DARWIN", True), \
+             patch("scapy.config.conf.L2socket", side_effect=OSError("No /dev/bpf available")), \
+             patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            with self.assertRaises(SystemExit) as cm:
+                probe.create_probe_socket("en0")
+            self.assertEqual(cm.exception.code, 1)
+            self.assertIn("Failed to open BPF socket on interface 'en0'", mock_stderr.getvalue())
+
     def test_darwin_route_and_neighbor_resolution(self):
         """Test Darwin route -n get, arp -an, and ndp -an resolution."""
         arp_out = "? (192.168.1.1) at 0:11:22:33:44:55 on en0 ifscope [ethernet]\n"
@@ -1018,6 +1039,62 @@ class TestProbeUnit(unittest.TestCase):
 
             src_ip6 = probe.resolve_source_ipv6("en0", target_ip="2001:db8::1")
             self.assertEqual(src_ip6, "2001:db8::100")
+
+
+class TestPlatformHelpers(unittest.TestCase):
+    def setUp(self):
+        self.lib_darwin = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "lib", "platform_darwin.sh"))
+        self.lib_linux = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "lib", "platform_linux.sh"))
+
+    def test_darwin_stat_helpers(self):
+        """Test Darwin platform_stat_owner, platform_stat_perm, platform_stat_nlinks, and platform_stat_mtime."""
+        with tempfile.NamedTemporaryFile() as tmp:
+            os.chmod(tmp.name, 0o644)
+            cmd = f"""
+            source "{self.lib_darwin}"
+            echo "$(platform_stat_owner "{tmp.name}")|$(platform_stat_perm "{tmp.name}")|$(platform_stat_nlinks "{tmp.name}")|$(platform_stat_mtime "{tmp.name}")"
+            """
+            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=True)
+            owner, perm, nlinks, mtime = res.stdout.strip().split("|")
+            self.assertEqual(int(owner), os.getuid())
+            self.assertEqual(perm, "644")
+            self.assertEqual(int(nlinks), 1)
+            self.assertGreater(int(mtime), 0)
+
+    def test_darwin_proc_helpers(self):
+        """Test Darwin platform_proc_starttime, platform_proc_comm, and platform_proc_cmdline."""
+        cmd = f"""
+        source "{self.lib_darwin}"
+        echo "$(platform_proc_comm "$$")|$(platform_proc_cmdline "$$")"
+        """
+        res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=True)
+        comm, cmdline = res.stdout.strip().split("|", 1)
+        self.assertIn("bash", comm.lower())
+        self.assertIn("bash", cmdline.lower())
+
+    def test_linux_stat_helpers(self):
+        """Test Linux platform_stat_owner, platform_stat_perm, platform_stat_nlinks, and platform_stat_mtime."""
+        with tempfile.NamedTemporaryFile() as tmp:
+            os.chmod(tmp.name, 0o600)
+            cmd = f"""
+            source "{self.lib_linux}"
+            echo "$(platform_stat_owner "{tmp.name}")|$(platform_stat_perm "{tmp.name}")|$(platform_stat_nlinks "{tmp.name}")|$(platform_stat_mtime "{tmp.name}")"
+            """
+            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=True)
+            owner, perm, nlinks, mtime = res.stdout.strip().split("|")
+            self.assertEqual(int(owner), os.getuid())
+            self.assertEqual(perm, "600")
+            self.assertEqual(int(nlinks), 1)
+            self.assertGreater(int(mtime), 0)
+
+    def test_linux_proc_helpers(self):
+        """Test Linux platform_proc_starttime, platform_proc_comm, and platform_proc_cmdline."""
+        cmd = f"""
+        source "{self.lib_linux}"
+        echo "$(platform_proc_comm "$$")"
+        """
+        res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=True)
+        self.assertIn("bash", res.stdout.strip().lower())
 
 
 if __name__ == "__main__":

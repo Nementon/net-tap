@@ -1635,6 +1635,111 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+echo -n "[TEST] Verifying Darwin ifconfig parser (100Mbps Full Duplex, active)... "
+STATUS_100M=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en2: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	ether 00:3e:e1:c4:90:02
+	media: autoselect (100baseTX <full-duplex>)
+	status: active
+EOF
+    }
+    platform_detect_port_status en2
+")
+if [[ "${STATUS_100M}" == "ACTIVE|100Mb/s|Full|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'ACTIVE|100Mb/s|Full|up', got '${STATUS_100M}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin ifconfig parser (2.5Gbps Full Duplex, active)... "
+STATUS_2500M=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en3: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	ether 00:3e:e1:c4:90:03
+	media: autoselect (2500baseT <full-duplex>)
+	status: active
+EOF
+    }
+    platform_detect_port_status en3
+")
+if [[ "${STATUS_2500M}" == "ACTIVE|2500Mb/s|Full|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'ACTIVE|2500Mb/s|Full|up', got '${STATUS_2500M}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin ifconfig parser (40Gbps Full Duplex, active)... "
+STATUS_40G=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en4: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 9000
+	ether 00:3e:e1:c4:90:04
+	media: 40Gbase-CR4 <full-duplex>
+	status: active
+EOF
+    }
+    platform_detect_port_status en4
+")
+if [[ "${STATUS_40G}" == "ACTIVE|40000Mb/s|Full|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'ACTIVE|40000Mb/s|Full|up', got '${STATUS_40G}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin ifconfig parser (100Gbps Full Duplex, active)... "
+STATUS_100G=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en5: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 9000
+	ether 00:3e:e1:c4:90:05
+	media: 100Gbase-CR4 <full-duplex>
+	status: active
+EOF
+    }
+    platform_detect_port_status en5
+")
+if [[ "${STATUS_100G}" == "ACTIVE|100000Mb/s|Full|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'ACTIVE|100000Mb/s|Full|up', got '${STATUS_100G}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin ifconfig parser (10Mbps Half Duplex, active)... "
+STATUS_HALF=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en6: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	ether 00:3e:e1:c4:90:06
+	media: 10baseT/UTP <half-duplex>
+	status: active
+EOF
+    }
+    platform_detect_port_status en6
+")
+if [[ "${STATUS_HALF}" == "ACTIVE|10Mb/s|Half|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'ACTIVE|10Mb/s|Half|up', got '${STATUS_HALF}')"
+    FAILED=$((FAILED + 1))
+fi
+
 echo -n "[TEST] Verifying Darwin ifconfig parser (inactive link)... "
 STATUS_INACTIVE=$(bash -c "
     source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
@@ -1734,6 +1839,85 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+echo -n "[TEST] Verifying multi-interface directory locking under NET_TAP_NO_FLOCK=1... "
+LOCK_MULTI_DIR=$(mktemp -d /tmp/net-tap-lockmulti-test.XXXXXX)
+if bash -c "
+    set -euo pipefail
+    STATE_DIR='${LOCK_MULTI_DIR}'
+    NET_TAP_NO_FLOCK=1
+    source '${SCRIPT_DIR}/../lib/core.sh'
+    acquire_lock 'en0,en1'
+    [[ -d \"\${STATE_DIR}/.lock_en0.lockdir\" ]] || exit 10
+    [[ -d \"\${STATE_DIR}/.lock_en1.lockdir\" ]] || exit 11
+    [[ -f \"\${STATE_DIR}/.lock_en0.lockdir/pid\" ]] || exit 12
+    [[ -f \"\${STATE_DIR}/.lock_en1.lockdir/pid\" ]] || exit 13
+    if ( HELD_LOCK_DIRS=(); acquire_lock 'en0' 2>/dev/null ); then
+        exit 14
+    fi
+    if ( HELD_LOCK_DIRS=(); acquire_lock 'en1' 2>/dev/null ); then
+        exit 15
+    fi
+    release_lock
+    [[ ! -d \"\${STATE_DIR}/.lock_en0.lockdir\" ]] || exit 16
+    [[ ! -d \"\${STATE_DIR}/.lock_en1.lockdir\" ]] || exit 17
+    exit 0
+"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "${LOCK_MULTI_DIR}" 2>/dev/null || true
+
+echo -n "[TEST] Verifying multi-interface locking rollback on contention... "
+LOCK_ROLL_DIR=$(mktemp -d /tmp/net-tap-lockroll-test.XXXXXX)
+if bash -c "
+    set -euo pipefail
+    STATE_DIR='${LOCK_ROLL_DIR}'
+    NET_TAP_NO_FLOCK=1
+    source '${SCRIPT_DIR}/../lib/core.sh'
+    mkdir -p \"\${STATE_DIR}/.lock_en1.lockdir\"
+    echo '\$\$' > \"\${STATE_DIR}/.lock_en1.lockdir/pid\"
+    if ( acquire_lock 'en0,en1' 2>/dev/null ); then
+        exit 10
+    fi
+    [[ ! -d \"\${STATE_DIR}/.lock_en0.lockdir\" ]] || exit 11
+    exit 0
+"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "${LOCK_ROLL_DIR}" 2>/dev/null || true
+
+echo -n "[TEST] Verifying stale directory lock auto-recovery on deceased PID... "
+LOCK_STALE_DIR=$(mktemp -d /tmp/net-tap-lockstale-test.XXXXXX)
+if bash -c "
+    set -euo pipefail
+    STATE_DIR='${LOCK_STALE_DIR}'
+    NET_TAP_NO_FLOCK=1
+    source '${SCRIPT_DIR}/../lib/core.sh'
+    mkdir -p \"\${STATE_DIR}/.lock_en0.lockdir\"
+    echo '999999' > \"\${STATE_DIR}/.lock_en0.lockdir/pid\"
+    acquire_lock 'en0' 2>/dev/null
+    [[ -d \"\${STATE_DIR}/.lock_en0.lockdir\" ]] || exit 10
+    local_pid=\$(cat \"\${STATE_DIR}/.lock_en0.lockdir/pid\")
+    [[ \"\${local_pid}\" == \"\$\$\" ]] || exit 11
+    release_lock
+    [[ ! -d \"\${STATE_DIR}/.lock_en0.lockdir\" ]] || exit 12
+    exit 0
+"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "${LOCK_STALE_DIR}" 2>/dev/null || true
+
 echo -n "[TEST] Verifying clean_sessions purges stale directory locks... "
 if bash -c "
     set -euo pipefail
@@ -1743,7 +1927,9 @@ if bash -c "
     source '${SCRIPT_DIR}/../lib/orchestration.sh'
     require_root() { :; }
     mkdir -p \"\${STATE_DIR}/.lock_stale.lockdir\"
+    echo '999999' > \"\${STATE_DIR}/.lock_stale.lockdir/pid\"
     mkdir -p \"\${STATE_DIR}/.lock_eth0.lockdir\"
+    echo '999999' > \"\${STATE_DIR}/.lock_eth0.lockdir/pid\"
     clean_sessions >/dev/null 2>&1
     if [[ -d \"\${STATE_DIR}/.lock_stale.lockdir\" || -d \"\${STATE_DIR}/.lock_eth0.lockdir\" || -d \"\${STATE_DIR}/.lock_master.lockdir\" ]]; then
         exit 1
@@ -1757,6 +1943,7 @@ else
     FAILED=$((FAILED + 1))
 fi
 rm -rf "${LOCK_TEST_DIR}" 2>/dev/null || true
+
 
 # 7.4 Darwin CLI Constraint Enforcement (-n / --netns and -t sfp)
 echo -n "[TEST] Verifying rejection of -n/--netns on Darwin... "
@@ -1813,6 +2000,63 @@ else
     echo "FAILED"
     FAILED=$((FAILED + 1))
 fi
+
+# 7.7 Darwin Platform Stat and Process Helper Assertions
+echo -n "[TEST] Verifying Darwin stat and process inspection helpers... "
+STAT_PROC_TEST=$(bash -c "
+    set -euo pipefail
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    tmp_f=\$(mktemp /tmp/net-tap-darwin-stat.XXXXXX)
+    chmod 640 \"\${tmp_f}\"
+    owner=\$(platform_stat_owner \"\${tmp_f}\")
+    perm=\$(platform_stat_perm \"\${tmp_f}\")
+    nlinks=\$(platform_stat_nlinks \"\${tmp_f}\")
+    mtime=\$(platform_stat_mtime \"\${tmp_f}\")
+    comm=\$(platform_proc_comm \"\$\$\")
+    rm -f \"\${tmp_f}\"
+    [[ \"\${owner}\" =~ ^[0-9]+$ ]] || exit 10
+    [[ \"\${perm}\" == \"640\" ]] || exit 11
+    [[ \"\${nlinks}\" == \"1\" ]] || exit 12
+    [[ \"\${mtime}\" =~ ^[0-9]+$ ]] || exit 13
+    [[ \"\${comm}\" =~ bash ]] || exit 14
+    echo 'SUCCESS'
+")
+if [[ "${STAT_PROC_TEST}" == "SUCCESS" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (stat/proc helper returned unexpected values)"
+    FAILED=$((FAILED + 1))
+fi
+
+# 7.8 Bash Version Requirement Preflight Check
+echo -n "[TEST] Verifying GNU Bash >= 4.3 preflight check enforcement... "
+BASH_VER_TEST=$(bash -c '
+    check_bash() {
+        local -a vers=("$@")
+        if (( vers[0] < 4 || (vers[0] == 4 && vers[1] < 3) )); then
+            echo "REJECTED"
+        else
+            echo "ACCEPTED"
+        fi
+    }
+    r_32=$(check_bash 3 2 57)
+    r_42=$(check_bash 4 2 53)
+    r_43=$(check_bash 4 3 0)
+    r_52=$(check_bash 5 2 15)
+    if [[ "${r_32}" == "REJECTED" && "${r_42}" == "REJECTED" && "${r_43}" == "ACCEPTED" && "${r_52}" == "ACCEPTED" ]]; then
+        echo "VALIDATED"
+    fi
+')
+if [[ "${BASH_VER_TEST}" == "VALIDATED" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+
 
 echo "================================================="
 echo " Test Results: ${PASSED} Passed | ${FAILED} Failed"

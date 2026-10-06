@@ -9,7 +9,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 set +m
 
 # Check GNU Bash version requirement
-if (( BASH_VERSINFO[0] < 4 )); then
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
     echo "ERROR: Bash version ${BASH_VERSION} is not supported. net-tap requires GNU Bash >= 4.3." >&2
     if [[ "$(uname -s)" == "Darwin"* ]]; then
         echo "On macOS, install modern Bash via Homebrew: brew install bash" >&2

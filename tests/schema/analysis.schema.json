@@ -24,7 +24,7 @@
     "vlans": {
       "type": "array",
       "uniqueItems": true,
-      "items": { "type": "string", "pattern": "^([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5])$" }
+      "items": { "type": "string", "pattern": "^([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5])$" }
     },
     "qinq_frames": {
       "type": "integer",
@@ -105,7 +105,7 @@
     },
     "protocols": {
       "type": "object",
-      "required": ["sctp", "pmtud", "ipv6_extension_headers", "tcp_options", "tcp_flags"],
+      "required": ["sctp", "pmtud", "next_hop_mtus", "ipv6_extension_headers", "tcp_options", "tcp_flags"],
       "properties": {
         "sctp": { "type": "integer", "minimum": 0 },
         "pmtud": { "type": "integer", "minimum": 0 },
@@ -177,7 +177,7 @@
     },
     "infrastructure_frames": {
       "type": "object",
-      "required": ["lldp", "cdp", "stp", "lacp", "vrrp", "hsrp", "isis", "bfd"],
+      "required": ["lldp", "cdp", "stp", "lacp", "vrrp", "hsrp", "isis", "bfd", "ospf"],
       "properties": {
         "lldp": { "type": "integer", "minimum": 0 },
         "cdp": { "type": "integer", "minimum": 0 },
@@ -299,7 +299,7 @@
         "responses_received": { "type": "integer", "minimum": 0 },
         "vlans_probed": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^(untagged|([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5])([,/]([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5]))?)$" }
+          "items": { "type": "string", "pattern": "^(untagged|([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5])([,/]([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5]))?)$" }
         },
         "discovered_hosts": {
           "type": "array",
@@ -321,7 +321,7 @@
                 ]
               },
               "mac": { "type": "string", "pattern": "^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$" },
-              "vlan": { "type": "string", "pattern": "^(untagged|([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5])([,/]([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|409[0-5]))?)$" }
+              "vlan": { "type": "string", "pattern": "^(untagged|([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5])([,/]([0-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5]))?)$" }
             },
             "additionalProperties": false
           }

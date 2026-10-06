@@ -252,7 +252,7 @@ tls_pkt = (
     Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") /
     IP(src="10.10.1.1", dst="10.10.1.254") /
     TCP(sport=52000, dport=443, flags="PA") /
-    TLS(msg=[TLSClientHello(ext=[TLS_Ext_ServerName(servernames=[ServerName(servername="login.microsoftonline.com")])])])
+    TLS(msg=[TLSClientHello(gmt_unix_time=1700000000, random_bytes=b"\x19\x61"*14, ext=[TLS_Ext_ServerName(servernames=[ServerName(servername="login.microsoftonline.com")])])])
 )
 packets.append(tls_pkt)
 

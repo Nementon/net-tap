@@ -12,7 +12,7 @@
 `net-tap` is an automated, network intelligence, stealth packet tapping, and active telemetry suite for Linux. It securely provisions physical or virtual interfaces into a **guaranteed zero-egress promiscuous capture state** (for passive monitoring) or a **watermarked selective-egress state** (for controlled active auditing), manages high-performance ring-buffered packet captures with proactive storage protection, and executes deep protocol analysis to instantly map complex dual-stack (IPv4/IPv6) enterprise and telecommunications networks.
 
 ### Two Operating Modes:
-* **Passive Stealth Mode (default)**: Enforces an unconditional hardware and kernel egress lock (via `tc clsact`, Netfilter `raw` drops, and 36 non-destructive sysctls) guaranteeing **0 outbound bytes** leak onto the monitored wire while capturing full line-rate traffic.
+* **Passive Stealth Mode (default)**: Enforces an unconditional hardware and kernel egress lock (via `tc clsact`, Netfilter `raw` drops, and 38 non-destructive sysctls) guaranteeing **0 outbound bytes** leak onto the monitored wire while capturing full line-rate traffic.
 * **Active Probing Mode (`--mode active`)**: Combines continuous passive recording with precision active auditing (`--arp-scan`, `--ndp-scan`, `--dhcp-discover`, `--dhcp-discover6`, `--icmp-pmtu`, `--tcp-syn`, `--eapol-check`, `--snmp-probe`, `--dns-probe`, `--nbns-probe`). Outbound probes are strictly tagged with watermarks (`0x7a9` / 1961), while all spontaneous host OS chatter (such as unsolicited kernel TCP RSTs or IPv6 SLAAC/DAD packets) is completely blocked at the kernel egress gate.
 
 ---
@@ -89,8 +89,8 @@ net-tap analyze -d /data/trace
 | Operational Challenge | How `net-tap` Solves It |
 | :--- | :--- |
 | **True Zero-Egress Stealth** | Traditional promiscuous mode still permits the host OS to transmit frames (IPv6 SLAAC/DAD, ARP announcements, LLDP/IGMP). These transmissions trip switchport security (MAC limits, 802.1X, BPDU guard) and immediately shut down production links. `net-tap` attaches a kernel `clsact` Traffic Control (`tc`) `matchall` drop filter (priority 1) and Netfilter raw `OUTPUT` drop rules, disables hardware firmware LLDP (`disable-fw-lldp on`), enables `rx-all on` and `rx-vlan-filter off`, sets `txqueuelen 0`, and leaves interfaces administratively `DOWN` on teardown to guarantee **zero outbound bytes** hit the wire, verified via kernel drop counters upon teardown. |
-| **Selective Egress & Active Watermarking** | Traditional active scanning tools trigger IDS alarms and alert remote firewalls by leaking unprompted kernel TCP RSTs and OS chatter. In `--mode active`, `net-tap` configures a selective kernel egress filter (`tc filter ... fwmark 0x7a9 pass` followed by `matchall drop`) that strictly permits authorized, watermarked probe frames (IPv4 IP ID `0x07a9`, IPv6 Flow Label `0x007a9`, ICMP Echo ID `1961`, socket mark `0x7a9`) while dropping 100% of host OS background chatter. |
-| **Non-Destructive Stealth Sysctls (36 Total)** | Naively setting `disable_ipv6=1` purges static and autoconfigured IPv6 addresses permanently. `net-tap` NEVER sets `disable_ipv6=1`. Instead, it applies 36 non-destructive stealth sysctls across IPv4 and IPv6: IPv6 (`keep_addr_on_down=1`, `addr_gen_mode=1`, `use_tempaddr=0`, `enhanced_dad=0`, `ndisc_notify=0`, `accept_redirects=0`, `router_solicitations=0`, `accept_dad=0`, `dad_transmits=0`, `accept_ra=0`, `autoconf=0`, `mldv1_unsolicited_report_interval=0`, `mldv2_unsolicited_report_interval=0`, `force_mld_version=2`, `drop_unsolicited_na=1`, `accept_untracked_na=0`, `forwarding=0`, `mc_forwarding=0`) and IPv4 (`arp_ignore=8`, `arp_announce=2`, `arp_filter=1`, `arp_notify=0`, `drop_gratuitous_arp=1`, `arp_accept=0`, `proxy_arp=0`, `proxy_arp_pvlan=0`, `send_redirects=0`, `accept_redirects=0`, `secure_redirects=0`, `drop_unicast_in_l2_multicast=1`, `igmpv2_unsolicited_report_interval=0`, `igmpv3_unsolicited_report_interval=0`, `force_igmp_version=3`, `forwarding=0`, `mc_forwarding=0`, `bc_forwarding=0`), faithfully restoring all original values (and interface operstate) on exit. |
+| **Selective Egress & Active Watermarking** | Traditional active scanning tools trigger IDS alarms and alert remote firewalls by leaking unprompted kernel TCP RSTs and OS chatter. In `--mode active`, `net-tap` configures a selective kernel egress filter (`tc filter ... fwmark 0x7a9 pass` followed by `matchall drop`) that strictly permits authorized, watermarked probe frames (IPv4 IP ID `0x07a9`, IPv6 Flow Label `0x007a9`, ICMP Echo ID `1961`, TCP Initial Sequence Number `1961000`, DNS / SNMP / NBNS Transaction IDs `1961`, socket mark `0x7a9`) while dropping 100% of host OS background chatter. |
+| **Non-Destructive Stealth Sysctls (38 Total)** | Naively setting `disable_ipv6=1` purges static and autoconfigured IPv6 addresses permanently. `net-tap` NEVER sets `disable_ipv6=1`. Instead, it applies 38 non-destructive stealth sysctls across IPv4 and IPv6: IPv6 (`keep_addr_on_down=1`, `addr_gen_mode=1`, `use_tempaddr=0`, `enhanced_dad=0`, `ndisc_notify=0`, `accept_redirects=0`, `router_solicitations=0`, `accept_dad=0`, `dad_transmits=0`, `accept_ra=0`, `autoconf=0`, `mldv1_unsolicited_report_interval=0`, `mldv2_unsolicited_report_interval=0`, `force_mld_version=2`, `drop_unsolicited_na=1`, `accept_untracked_na=0`, `forwarding=0`, `mc_forwarding=0`, `proxy_ndp=0`, `drop_unicast_in_l2_multicast=1`) and IPv4 (`arp_ignore=8`, `arp_announce=2`, `arp_filter=1`, `arp_notify=0`, `drop_gratuitous_arp=1`, `arp_accept=0`, `proxy_arp=0`, `proxy_arp_pvlan=0`, `send_redirects=0`, `accept_redirects=0`, `secure_redirects=0`, `drop_unicast_in_l2_multicast=1`, `igmpv2_unsolicited_report_interval=0`, `igmpv3_unsolicited_report_interval=0`, `force_igmp_version=3`, `forwarding=0`, `mc_forwarding=0`, `bc_forwarding=0`), faithfully restoring all original values (and interface operstate) on exit. |
 | **Connection Tracking (`conntrack`) Protection** | Mirrored line-rate SPAN traffic quickly overwhelms the Netfilter state table, causing kernel memory exhaustion and dropping legitimate host traffic. `net-tap` installs raw `PREROUTING` and `OUTPUT` `NOTRACK` rules in `iptables` and `ip6tables` to bypass connection tracking entirely. |
 | **Microburst Loss & Ring-Buffer Protection** | High-speed links easily drop packets at the socket buffer or fill physical drives. `net-tap` dynamically maximizes hardware Rx descriptor rings to the NIC's preset maximum (via `ethtool -g`, falling back to 4096), provisions a 64 MB `libpcap` buffer (`-B 65536`), disables all 7 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, `rxvlan`, `rx-vlan-filter`) and enables `rx-all` to preserve exact frame boundaries, enables nanosecond timestamping (`--time-stamp-precision nano`), and enforces strict rotating chunk limits with active 2-second filesystem threshold monitoring. |
 | **Dual-Stack & Telecom Reconnaissance** | Rather than requiring manual Wireshark inspection, `net-tap` parses PCAP headers dynamically to discover VLAN trunks, 802.1ad and legacy (`0x9100`/`0x9200`) QinQ, IPv4 /24 subnets, IPv6 SLAAC prefixes, overlay and carrier tunnels (VXLAN, GTP-U, GTP-C, Geneve, GRE, 6in4, 4in6, SRv6, MPLS), Path MTU Discovery (PMTUD), SCTP signaling, TCP connection handshakes/flags (SYN, SYN-ACK, RST, FIN, PSH, URG, zero-window, retransmissions), carrier routing (IS-IS, BFD, OSPFv2, OSPFv3, BGP), and L4-L7 application metadata (DNS, TLS SNI, SNMP). |
@@ -288,6 +288,12 @@ sudo make install
 sudo make uninstall
 ```
 
+> [!NOTE]
+> On Debian and Ubuntu systems, `/usr/local/sbin` may not be included in the default non-root user `$PATH`. To run unprivileged commands like `net-tap status` or `net-tap analyze` without specifying the full path, ensure `/usr/local/sbin` is exported in your `~/.bashrc`:
+> ```bash
+> export PATH="/usr/local/sbin:$PATH"
+> ```
+
 ---
 
 ## Command Reference
@@ -354,7 +360,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | - | `--ndp-scan` | Scan IPv6 prefix, host, all-routers (`ff02::2`), or all-nodes (`ff02::1`) via ICMPv6 NS/RS/Echo. | `ff02::2` |
 | - | `--dhcp-discover`| Broadcast RFC 2131 DHCP Discover (IPv4) to audit DHCP servers. | None |
 | - | `--dhcp-discover6`, `--dhcp6-discover`| Transmit RFC 8415 DHCPv6 Solicit (IPv6 UDP 546->547) to audit DHCPv6 servers. | None |
-| - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 576-9000B, IPv6: 1280-9000B). | `192.168.1.1` |
+| - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 576-9000B) or unfragmented ICMPv6 Echo requests (IPv6: 1280-9000B). | `192.168.1.1` (IPv4) / `2001:db8::1` (IPv6) |
 | - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | `192.168.1.1` |
 | - | `--eapol-check`, `--eapol-probe` | Audit 802.1X Network Access Control via single EAPOL-Start frame. | None |
 | - | `--snmp-probe` | Probe SNMPv2c sysDescr.0 via single UDP 161 frame. | `192.168.1.1` |
@@ -404,6 +410,12 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | `JSON_OUT` | When set to `1`, forces `analyze` and `list` to emit JSON output (`--json` / `-j`). | `0` |
 | `BPF_FILTER` | Default BPF filter applied to captures if `-f` is omitted. | None |
 | `NET_TAP_DISABLE_TSHARK` | When set to `1`, forces offline analyzer to use native `tcpdump` engine instead of `tshark`. | `0` |
+| `DEFAULT_MODE` | Default operational mode if `-m` is omitted (`passive` or `active`). | `passive` |
+| `DEFAULT_OUT_DIR` | Default capture and log output directory if `-o` / `-d` is omitted. | `./captures` |
+| `DEFAULT_HW_TYPE` | Default hardware interface type if `-t` is omitted (`ethernet` or `sfp`). | `ethernet` |
+| `DEFAULT_SPEED` | Default link speed in Mbps forced on SFP transceivers if `-s` is omitted. | Auto |
+| `DEFAULT_ROTATE_SIZE` | Default ring-buffer max size per PCAP file in MB if `-C` is omitted. | `100` |
+| `DEFAULT_ROTATE_COUNT` | Default ring-buffer chunk retention file count if `-W` is omitted. | `10` |
 
 ---
 
@@ -427,6 +439,10 @@ sudo net-tap off -i eth1
 
 ### 2. Dual-Port Optical Tap Aggregation (Tx/Rx)
 When tapping a full-duplex fiber link with an optical splitter tap, transmit (Tx) and receive (Rx) directions arrive on separate physical SFP ports. `net-tap` provisions both interfaces simultaneously, applies zero-egress filters to both, and merges the PCAPs into a single chronological trace (`*_merged_trace.pcap`) upon teardown:
+
+> [!IMPORTANT]
+> **Why Linux Bonding (`balance-xor` / `mode 2`) is Forbidden:**
+> Traditional networking tutorials occasionally suggest binding two split-fiber taps under a Linux bonding master (`bond0`). In `net-tap`, enslaved ports are explicitly rejected during pre-flight. Kernel bonding masters can emit LACP frames, STP BPDUs, or ARP probes onto the wire, compromising zero-egress stealth. Instead, `net-tap` captures on both physical ports independently and merges their nanosecond-timestamped ring buffers cleanly via `mergecap`.
 
 ```bash
 # Start dual-port capture with gzip compression and 2-hour auto-shutdown
@@ -1139,6 +1155,7 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
   "protocols": {
     "sctp": 1,
     "pmtud": 1,
+    "next_hop_mtus": ["1492"],
     "ipv6_extension_headers": {
       "hop_by_hop": 0,
       "routing": 0,
@@ -1171,7 +1188,8 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     "vrrp": 2,
     "hsrp": 1,
     "isis": 1,
-    "bfd": 1
+    "bfd": 1,
+    "ospf": 0
   },
   "security_frames": {
     "eapol": 0,

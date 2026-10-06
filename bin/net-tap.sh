@@ -25,6 +25,8 @@ else
     exit 1
 fi
 
+LIB_DIR=$(readlink -f "${LIB_DIR}")
+
 if [[ $EUID -eq 0 ]]; then
     lib_owner=$(stat -c "%u" "${LIB_DIR}" 2>/dev/null || echo "-1")
     lib_perm=$(stat -c "%a" "${LIB_DIR}" 2>/dev/null || echo "777")
@@ -67,6 +69,7 @@ main() {
     JSON_OUT="${JSON_OUT:-0}"
     COMPRESS_PCAPS="${COMPRESS_PCAPS:-0}"
     DISK_THRESH=85
+    FORCE_CLEAN="${FORCE_CLEAN:-0}"
 
     # Probe Parameters
     PROBE_TYPE=""
@@ -301,6 +304,10 @@ main() {
                 PROBE_QINQ_TPID="$2"
                 shift 2
                 ;;
+            --force)
+                FORCE_CLEAN=1
+                shift
+                ;;
             -h|--help)
                 usage 0
                 ;;
@@ -483,13 +490,10 @@ main() {
     if [[ -n "${BPF_FILTER}" ]]; then
         local base_filter="${BPF_FILTER}"
         local expanded_clauses=("(${base_filter})")
-        if ! echo "${base_filter}" | grep -qiE '\bvlan\b|0x88a8|0x9100|0x9200'; then
+        if ! echo "${base_filter}" | grep -qiE '\bvlan\b'; then
             expanded_clauses+=(
                 "(vlan and (${base_filter}))"
                 "(vlan and vlan and (${base_filter}))"
-                "(ether proto 0x88a8 and (${base_filter}))"
-                "(ether proto 0x9100 and (${base_filter}))"
-                "(ether proto 0x9200 and (${base_filter}))"
             )
         fi
         if ! echo "${base_filter}" | grep -qiE '\bmpls\b'; then

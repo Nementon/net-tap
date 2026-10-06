@@ -358,7 +358,7 @@ acquire_lock() {
 }
 
 release_lock() {
-    for fd in "${HELD_LOCK_FDS[@]:-}"; do
+    for fd in ${HELD_LOCK_FDS[@]+"${HELD_LOCK_FDS[@]}"}; do
         flock -u "${fd}" 2>/dev/null || true
         _close_fd "${fd}"
     done
@@ -396,6 +396,7 @@ Options:
   -z, --gzip                Enable gzip compression for rotated PCAP chunks.
   -w, --watchdog-threshold <pct> Disk watchdog shutdown threshold % (default: 85).
   -j, --json                Output analyze or list results as JSON (suppresses human-readable text).
+  --force                   Force cleanup and termination of running captures during 'clean'.
   -h, --help                Show this help message.
 
 Probe Options (for 'probe' command):

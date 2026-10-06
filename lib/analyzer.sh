@@ -672,7 +672,7 @@ try:
                                 ipv4_counter[str(addr2)] += 1
                                 f_ep1 = f"{ip1}:{p1}" if p1 else ip1
                                 f_ep2 = f"{ip2}:{p2}" if p2 else ip2
-                                flow = f"{f_ep1} <-> {f_ep2}"
+                                flow = " <-> ".join(sorted([f_ep1, f_ep2]))
                                 flow_counter[flow] += 1
                         elif addr1.version == 6 and addr2.version == 6:
                             if not (addr1.is_multicast or addr2.is_multicast or addr1.is_loopback or addr2.is_loopback or addr1.is_unspecified or addr2.is_unspecified):
@@ -680,7 +680,7 @@ try:
                                 ipv6_counter[str(addr2)] += 1
                                 f_ep1 = f"[{ip1}]:{p1}" if p1 else f"[{ip1}]"
                                 f_ep2 = f"[{ip2}]:{p2}" if p2 else f"[{ip2}]"
-                                flow = f"{f_ep1} <-> {f_ep2}"
+                                flow = " <-> ".join(sorted([f_ep1, f_ep2]))
                                 flow_counter[flow] += 1
                     except Exception:
                         pass
@@ -1070,7 +1070,8 @@ if os.path.exists(dump_path):
                 v4_icmp_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+>\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):\s+ICMP", line)
                 if v4_icmp_m:
                     resp_ip = v4_icmp_m.group(1)
-                    if not probed_ips or resp_ip in probed_ips:
+                    is_pmtud_hop = ("need to frag" in line or "packet too big" in line)
+                    if not probed_ips or resp_ip in probed_ips or is_pmtud_hop:
                         key = (resp_ip, pkt_vlan)
                         if key not in discovered_hosts_dict and current_src_mac:
                             discovered_hosts_dict[key] = current_src_mac
@@ -1078,7 +1079,8 @@ if os.path.exists(dump_path):
                     v6_icmp_m = re.search(r"([0-9a-fA-F:]+)\s+>\s+([0-9a-fA-F:]+):\s+ICMP6", line)
                     if v6_icmp_m:
                         resp_ip = v6_icmp_m.group(1).lower()
-                        if not probed_ips or resp_ip in probed_ips:
+                        is_pmtud_hop = ("need to frag" in line or "packet too big" in line)
+                        if not probed_ips or resp_ip in probed_ips or is_pmtud_hop:
                             key = (resp_ip, pkt_vlan)
                             if key not in discovered_hosts_dict and current_src_mac:
                                 discovered_hosts_dict[key] = current_src_mac
@@ -1097,7 +1099,7 @@ if os.path.exists(dump_path):
                 continue
 
             # Check DHCPv6
-            if "DHCPv6" in line and ("reply" in line.lower() or "advertise" in line.lower()):
+            if ("dhcp6" in line.lower() or "dhcpv6" in line.lower()) and ("reply" in line.lower() or "advertise" in line.lower()):
                 responses_received += 1
                 v6_dhcp_m = re.search(r"([0-9a-fA-F:]+)\.547\s+>\s+([0-9a-fA-F:]+)\.546", line)
                 if v6_dhcp_m:
@@ -1391,7 +1393,7 @@ except Exception:
     "dns_queries": $(to_jarr "$dns_names" 253),
     "tls_sni": $(to_jarr "$tls_sni" 253)
   },
-  "top_talkers": $(cat "${TEMP_DIR}/top_talkers.json" 2>/dev/null || echo '{"ipv4":[],"ipv6":[],"flows":[]}')$(if [[ -f "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
+  "top_talkers": $(if [[ -s "${TEMP_DIR}/top_talkers.json" ]]; then cat "${TEMP_DIR}/top_talkers.json"; else echo '{"ipv4":[],"ipv6":[],"flows":[]}'; fi)$(if [[ -s "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
 }
 EOF
     fi

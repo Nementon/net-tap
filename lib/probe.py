@@ -22,6 +22,7 @@ import ipaddress
 import json
 import os
 import random
+import re
 import signal
 import socket
 import struct
@@ -48,9 +49,10 @@ except ImportError as err:
     sys.stderr.write(f"ERROR: Scapy is required for net-tap probe ({err}).\n")
     sys.exit(1)
 
-SO_MARK = 36  # Linux SO_MARK socket option
+SO_MARK = getattr(socket, "SO_MARK", 36)  # Linux SO_MARK socket option
 PROBE_FWMARK = 0x7a9  # 1961 - Net-Tap fwmark & wire watermark identifier
 SIOCGIFHWADDR = 0x8927  # Linux ioctl to get hardware MAC address
+ETH_P_ALL = 0x0003  # Linux protocol identifier for all incoming L2 frames
 ETH_P_ARP = 0x0806  # Ethernet protocol ARP (0x0806)
 ETH_P_IPV6 = 0x86dd  # Ethernet protocol IPv6 (0x86dd)
 
@@ -61,7 +63,7 @@ def get_iface_mac(iface: str, explicit_mac: str = None) -> str:
     """Retrieve physical MAC address of interface with explicit override and sysfs fallback."""
     if explicit_mac:
         clean = explicit_mac.strip().lower()
-        if len(clean) == 17 and clean.count(":") == 5:
+        if re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", clean):
             return clean
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -234,7 +236,7 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     sn_mcast_mac = f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
                     ns = IPv6(src=src_ip_clean, dst=sn_mcast_ip, fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_NS(tgt=str(tgt_obj)) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                     ns_frame = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_IPV6)) as r_sock:
+                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -254,9 +256,8 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                 except Exception:
                     pass
 
-            # Solicited-Node Multicast fallback (RFC 4291)
-            last_24 = tgt_obj.exploded[-7:].replace(":", "")
-            return f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
+            # Fall back to broadcast MAC (ff:ff:ff:ff:ff:ff) for failed unicast resolution (RFC 4291 compliant)
+            return "ff:ff:ff:ff:ff:ff"
 
         elif not is_v6 and isinstance(tgt_obj, ipaddress.IPv4Address):
             if os.path.exists("/proc/net/arp"):
@@ -286,7 +287,7 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     s_ip = (src_ip or "0.0.0.0").split("%")[0]
                     arp_req = ARP(op=1, hwsrc=src_mac, psrc=s_ip, pdst=str(tgt_obj))
                     arp_frame = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ARP)) as r_sock:
+                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -461,8 +462,14 @@ def main():
             sys.exit(1)
 
     # Prepare audit log
-    os.makedirs(os.path.dirname(os.path.abspath(args.audit_file)), exist_ok=True)
-    audit_f = open(args.audit_file, "a", encoding="utf-8", buffering=1)
+    audit_path = os.path.abspath(args.audit_file)
+    os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+    audit_fd = os.open(
+        audit_path,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+        0o600
+    )
+    audit_f = open(audit_fd, "a", encoding="utf-8", buffering=1)
 
     sock = create_probe_socket(iface)
     pacing_interval = 1.0 / max(1, args.rate)
@@ -642,7 +649,7 @@ def main():
                     except ValueError as err:
                         sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
                         sys.exit(1)
-                    sizes = [1280, 1420, 1500, 2000, 4000, 9000]
+                    sizes = [1280, 1420, 1450, 1492, 1500, 2000, 4000, 9000]
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
@@ -710,7 +717,15 @@ def main():
                         break
                     seq += 1
                     sport = random.randint(30000, 60000)
-                    tcp_layer = TCP(sport=sport, dport=port, flags="S", seq=1961000)
+                    isn = (1961000 + (seq * 65536) + random.randint(1, 65535)) & 0xFFFFFFFF
+                    mss_val = 1440 if is_v6 else 1460
+                    tcp_options = [
+                        ("MSS", mss_val),
+                        ("WScale", 7),
+                        ("SAckOK", b""),
+                        ("Timestamp", (int(time.time()), 0))
+                    ]
+                    tcp_layer = TCP(sport=sport, dport=port, flags="S", seq=isn, options=tcp_options)
                     if is_v6:
                         syn_pkt = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / tcp_layer
                     else:
@@ -723,7 +738,7 @@ def main():
                         sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
                         break
                     log_audit(audit_f, audit_id, "tcp_syn", target_ip, vid, args.qinq, src_mac, dst_mac, seq,
-                              {"dport": port, "sport": sport, "ip_version": 6 if is_v6 else 4})
+                              {"dport": port, "sport": sport, "ip_version": 6 if is_v6 else 4, "seq": isn})
                     packet_count += 1
                     time.sleep(pacing_interval)
 

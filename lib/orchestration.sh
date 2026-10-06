@@ -175,7 +175,8 @@ _autoshutdown_worker() {
 _disk_watchdog_worker() {
     local thresh="$1" outdir="$2" ifc="$3" ns="${4:-}" script="${5:-$(readlink -f "$0")}" stfile="$6" rot_count="${7:-10}" capture_pids="${8:-}" session_ts="${9:-}"
     local sleep_pid=""
-    trap '[[ -n "${sleep_pid}" ]] && kill -TERM "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT HUP EXIT
+    trap '[[ -n "${sleep_pid}" ]] && kill -TERM "${sleep_pid}" 2>/dev/null || true; exit 0' TERM INT EXIT
+    trap '' HUP
     for fd_path in /proc/self/fd/*; do
         local fd="${fd_path##*/}"
         if [[ "$fd" =~ ^[0-9]+$ ]] && [[ "$fd" -ge 3 ]]; then
@@ -202,13 +203,10 @@ _disk_watchdog_worker() {
         IFS=',' read -ra ifc_arr <<< "${ifc}"
         for dev in "${ifc_arr[@]}"; do
             local chunk_files=()
-            local pattern="${outdir}/*_${dev}_trace.pcap*"
-            if [[ -n "${session_ts}" ]]; then
-                pattern="${outdir}/${session_ts}_${dev}_trace.pcap*"
-            fi
+            local pfx="${session_ts:-*}${session_ts:+_}${dev}_trace.pcap*"
             while IFS= read -r f; do
                 [[ -f "$f" ]] && chunk_files+=("$f")
-            done < <(ls -1t ${pattern} 2>/dev/null || true)
+            done < <(find "${outdir}" -maxdepth 1 -name "${pfx}" -printf "%T@ %p\n" 2>/dev/null | sort -nr | awk '{print $2}')
             if [[ ${#chunk_files[@]} -gt ${rot_count} ]]; then
                 for ((idx=rot_count; idx<${#chunk_files[@]}; idx++)); do
                     rm -f "${chunk_files[$idx]}" 2>/dev/null || true
@@ -595,7 +593,7 @@ start_tap() {
         local TCPDUMP_ERR="${OUT_DIR}/${TIMESTAMP}_${iface}_tcpdump.log"
 
         _close_lock_fds() {
-            for lfd in "${HELD_LOCK_FDS[@]:-}"; do
+            for lfd in ${HELD_LOCK_FDS[@]+"${HELD_LOCK_FDS[@]}"}; do
                 [[ -n "${lfd}" ]] && eval "exec ${lfd}>&-" 2>/dev/null || true
             done
         }
@@ -1114,6 +1112,8 @@ clean_sessions() {
 
     local cleaned_sessions=0
     local cleaned_locks=0
+    local filter_iface="${IFACE:-}"
+    local filter_netns="${NETNS:-}"
 
     mkdir -p "${STATE_DIR}"
     local master_lock="${STATE_DIR}/.lock_master"
@@ -1160,10 +1160,29 @@ clean_sessions() {
             [[ -z "${parsed_clean}" ]] && continue
             IFS=$'\037' read -r s_iface s_netns s_pids_str s_validity <<< "${parsed_clean}"
 
-            if [[ -n "${IFACE:-}" && "${IFACE}" != "${s_iface}" ]]; then
+            if [[ -n "${filter_iface}" && "${filter_iface}" != "${s_iface}" ]]; then
                 continue
             fi
-            if [[ -n "${NETNS:-}" && "${NETNS}" != "${s_netns}" ]]; then
+            if [[ -n "${filter_netns}" && "${filter_netns}" != "${s_netns}" ]]; then
+                continue
+            fi
+
+            local is_alive=0
+            read -ra pids_to_check <<< "${s_pids_str}"
+            for p in "${pids_to_check[@]}"; do
+                if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
+                    if kill -0 "$p" 2>/dev/null; then
+                        is_alive=1
+                        break
+                    elif [[ -n "${s_netns}" ]] && ip netns exec "${s_netns}" kill -0 "$p" 2>/dev/null; then
+                        is_alive=1
+                        break
+                    fi
+                fi
+            done
+
+            if [[ "${is_alive}" -eq 1 && "${FORCE_CLEAN:-0}" -ne 1 ]]; then
+                log_warn "Active monitoring session detected on '${s_iface}' (PID alive). Skipping active capture (use 'net-tap off -i ${s_iface}' or 'net-tap clean --force' to terminate)."
                 continue
             fi
 
@@ -1225,7 +1244,7 @@ clean_sessions() {
             cleaned_sessions=$((cleaned_sessions + 1))
         done
 
-        if [[ -z "${IFACE:-}" ]]; then
+        if [[ -z "${filter_iface}" ]]; then
             for lk in "${STATE_DIR}"/.lock_* "${STATE_DIR}"/*.lock; do
                 [[ -f "${lk}" ]] || continue
                 [[ "$(basename "${lk}")" == ".lock_master" ]] && continue
@@ -1238,8 +1257,8 @@ clean_sessions() {
                 fi
             done
         else
-            local safe_i="${IFACE//\//_}"
-            local safe_n="${NETNS//\//_}"
+            local safe_i="${filter_iface//\//_}"
+            local safe_n="${filter_netns//\//_}"
             local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
             [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
             for lk in "${lk_pattern}"*; do

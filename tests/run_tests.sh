@@ -282,6 +282,7 @@ if [[ $EUID -ne 0 ]]; then
     assert_fail "requires root privileges" "$BIN_PATH" off -i lo
     assert_fail "requires root privileges" "$BIN_PATH" probe -i lo --arp-scan
     assert_fail "requires root privileges" "$BIN_PATH" clean
+    assert_fail "requires root privileges" "$BIN_PATH" clean --force
 else
     # We are root; test that non-root user is rejected by staging into /tmp
     if command -v su >/dev/null 2>&1 && id -u nobody >/dev/null 2>&1; then
@@ -630,6 +631,26 @@ except jsonschema.ValidationError:
             PASSED=$((PASSED + 1))
         else
             echo "FAILED (Schema failed to reject out-of-range VLAN ID 4096)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema acceptance of high-range VLAN IDs (4000-4089)... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['vlans'] = ['4000', '4050', '4089']
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(0)
+except jsonschema.ValidationError:
+    sys.exit(1)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema erroneously rejected valid VLAN IDs in 4000-4089 range)"
             FAILED=$((FAILED + 1))
         fi
 

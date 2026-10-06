@@ -32,7 +32,7 @@ lint:
 	fi
 	@echo "Checking Python fixture generator and probe syntax..."
 	@if command -v python3 >/dev/null 2>&1; then \
-		python3 -B -c "import ast; ast.parse(open('tests/generate_carrier_fixtures.py').read()); ast.parse(open('lib/probe.py').read())" && echo "Python syntax passed!"; \
+		python3 -B -c "import ast; [ast.parse(open(f).read()) for f in ['tests/generate_carrier_fixtures.py', 'lib/probe.py', 'tests/test_probe_unit.py']]" && echo "Python syntax passed!"; \
 	fi
 	@echo "Validating Draft-7 analysis JSON schema..."
 	@if command -v python3 >/dev/null 2>&1; then \
@@ -49,6 +49,8 @@ fixtures:
 	fi
 
 test: lint fixtures
+	@echo "Running Python probe mock unit tests..."
+	@python3 -B tests/test_probe_unit.py
 	@echo "Running automated compliance and unit tests..."
 	@bash tests/run_tests.sh
 

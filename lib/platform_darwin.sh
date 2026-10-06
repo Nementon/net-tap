@@ -167,3 +167,79 @@ platform_proc_cmdline() {
     [[ -z "${pid}" ]] && return 0
     ps -p "${pid}" -o command= 2>/dev/null || echo ""
 }
+
+# --- Darwin Exec Platform Hooks ---
+
+darwin_setup_exec_pf_group() {
+    local iface="$1"
+    local group_name="${2:-_nettap_active}"
+    local vlan_if="${3:-}"
+
+    if ! command -v pfctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local iface_list="${iface}"
+    if [[ -n "${vlan_if}" ]]; then
+        iface_list="{ ${iface}, ${vlan_if} }"
+    fi
+
+    # Synthesize pass rules for active net-tap GID and drop everything else
+    local pf_rules
+    pf_rules=$(printf "pass out quick on %s proto { tcp, udp, icmp, icmp6 } group %s\nblock drop out quick on %s all\n" \
+               "${iface_list}" "${group_name}" "${iface}")
+
+    echo "${pf_rules}" | pfctl -a "net_tap_${iface}" -f - 2>/dev/null || {
+        log_warn "Failed to apply PF anchor rules for group ${group_name} on ${iface}."
+    }
+}
+
+darwin_teardown_exec_pf_group() {
+    local iface="$1"
+    if command -v pfctl >/dev/null 2>&1; then
+        # Restore default active-session drop rules
+        darwin_enable_pf_drop "${iface}"
+    fi
+}
+
+darwin_setup_exec_vlan() {
+    local iface="$1"
+    local vlan="$2"
+    local vlan_if="vlan${vlan}"
+
+    ifconfig "${vlan_if}" create 2>/dev/null || true
+    ifconfig "${vlan_if}" vlan "${vlan}" vlandev "${iface}" 2>/dev/null || true
+    ifconfig "${vlan_if}" up 2>/dev/null || true
+
+    echo "${vlan_if}"
+}
+
+darwin_teardown_exec_vlan() {
+    local vlan_if="$1"
+    if [[ -n "${vlan_if}" ]]; then
+        ifconfig "${vlan_if}" destroy 2>/dev/null || true
+    fi
+}
+
+darwin_adjust_baby_giant_mtu() {
+    local iface="$1"
+    local overhead="${2:-4}"
+    local cur_mtu
+    cur_mtu=$(ifconfig "${iface}" 2>/dev/null | awk '/mtu / {print $NF}' || echo "1500")
+
+    local required_mtu=$((1500 + overhead))
+    if [[ "${cur_mtu}" =~ ^[0-9]+$ && "${cur_mtu}" -lt "${required_mtu}" ]]; then
+        ifconfig "${iface}" mtu "${required_mtu}" 2>/dev/null || true
+        echo "${cur_mtu}"
+    else
+        echo ""
+    fi
+}
+
+darwin_restore_baby_giant_mtu() {
+    local iface="$1"
+    local orig_mtu="$2"
+    if [[ -n "${orig_mtu}" && "${orig_mtu}" =~ ^[0-9]+$ ]]; then
+        ifconfig "${iface}" mtu "${orig_mtu}" 2>/dev/null || true
+    fi
+}

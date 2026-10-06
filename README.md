@@ -4,27 +4,33 @@
 
 # Net-Tap: Stealth Tap & Active Telemetry Suite
 
-![Platform](https://img.shields.io/badge/Platform-Linux-blue)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-blue)
 ![ShellCheck](https://img.shields.io/badge/ShellCheck-Passing-brightgreen)
 [![CI](https://github.com/Nementon/net-tap/actions/workflows/ci.yml/badge.svg)](https://github.com/Nementon/net-tap/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/License-Beerware-orange)
 
-`net-tap` is an automated, network intelligence, stealth packet tapping, and active telemetry suite for Linux. It securely provisions physical or virtual interfaces into a **guaranteed zero-egress promiscuous capture state** (for passive monitoring) or a **watermarked selective-egress state** (for controlled active auditing), manages high-performance ring-buffered packet captures with proactive storage protection, and executes deep protocol analysis to instantly map complex dual-stack (IPv4/IPv6) enterprise and telecommunications networks.
+`net-tap` is an automated, cross-platform network intelligence, stealth packet tapping, and active telemetry suite for Linux and macOS. It provisions physical or virtual interfaces into a **guaranteed zero-egress promiscuous capture state** (Linux carrier grade) or a **tactical lab capture state** (macOS Packet Filter isolation), manages high-performance ring-buffered packet captures with proactive storage protection, and executes deep protocol analysis to instantly map complex dual-stack (IPv4/IPv6) enterprise and telecommunications networks.
+
+### Dual-Tier Platform Profiles:
+* **Profile 1 (Linux Carrier-Grade Engine)**: Enforces unconditional hardware and kernel egress locks (`tc clsact`, Netfilter `raw` drops, 38 non-destructive stealth sysctls, ethtool offload neutralization, and optical SFP DDM) guaranteeing **0 outbound bytes** leak onto monitored production links.
+* **Profile 2 (macOS Darwin Tactical Lab)**: Leverages native macOS Packet Filter (`pfctl`) anchors for best-effort host silencing, Scapy BPF (`/dev/bpf*`) packet injection for active probing, atomic directory session locking, and 100% portable offline L2–L7 protocol analysis.
 
 ### Two Operating Modes:
-* **Passive Stealth Mode (default)**: Enforces an unconditional hardware and kernel egress lock (via `tc clsact`, Netfilter `raw` drops, and 38 non-destructive sysctls) guaranteeing **0 outbound bytes** leak onto the monitored wire while capturing full line-rate traffic.
-* **Active Probing Mode (`--mode active`)**: Combines continuous passive recording with precision active auditing (`--arp-scan`, `--ndp-scan`, `--dhcp-discover`, `--dhcp-discover6`, `--icmp-pmtu`, `--tcp-syn`, `--eapol-check`, `--snmp-probe`, `--dns-probe`, `--nbns-probe`). Outbound probes are strictly tagged with watermarks (`0x7a9` / 1961), while all spontaneous host OS chatter (such as unsolicited kernel TCP RSTs or IPv6 SLAAC/DAD packets) is completely blocked at the kernel egress gate.
+* **Passive Stealth Mode (default)**: Enforces unconditional egress silencing (`tc clsact` on Linux; `pfctl` anchor on macOS) guaranteeing zero unintended traffic leaks onto the monitored wire while capturing full line-rate traffic.
+* **Active Probing Mode (`--mode active`)**: Combines continuous passive recording with precision active auditing (`--arp-scan`, `--ndp-scan`, `--dhcp-discover`, `--dhcp-discover6`, `--icmp-pmtu`, `--tcp-syn`, `--eapol-check`, `--snmp-probe`, `--dns-probe`, `--nbns-probe`). Outbound probes are strictly tagged with watermarks (`0x7a9` / 1961 on Linux; direct BPF injection on macOS), while spontaneous host OS chatter is blocked at the egress gate.
 
 ---
 
 ## Table of Contents
 - [Quick Start](#quick-start)
 - [Concept Overview](#concept-overview)
+- [Platform Architecture & Support Matrix](#platform-architecture--support-matrix)
 - [Key Features](#key-features)
   - [Hardware & Data Path Stealth](#hardware--data-path-stealth)
   - [Controlled Active Auditing & Selective Egress](#controlled-active-auditing--selective-egress)
   - [High-Performance Capture & Buffer Safety](#high-performance-capture--buffer-safety)
   - [Dual-Stack & Deep Protocol Inspection (DPI)](#dual-stack--deep-protocol-inspection-dpi)
+  - [macOS Darwin Tactical Lab Support](#macos-darwin-tactical-lab-support)
 - [Privilege Model & Security](#privilege-model--security)
 - [System Requirements & Dependencies](#system-requirements--dependencies)
 - [Installation & Uninstallation](#installation--uninstallation)
@@ -51,6 +57,7 @@
     - [Smart Passive-to-Active Discovery (--auto-vlans)](#smart-passive-to-active-discovery---auto-vlans)
   - [8. Session Enumeration & Fleet Management (list)](#8-session-enumeration--fleet-management-list)
   - [9. Disaster Recovery & Orphan Reconciler (clean)](#9-disaster-recovery--orphan-reconciler-clean)
+  - [10. macOS Tactical Lab Capture & Telemetry](#10-macos-tactical-lab-capture--telemetry)
 - [Sample Analysis Output](#sample-analysis-output)
   - [Human-Readable Terminal Dashboard](#human-readable-terminal-dashboard)
   - [Structured JSON Export Schema](#structured-json-export-schema)
@@ -158,6 +165,56 @@ flowchart LR
 
 ---
 
+## Platform Architecture & Support Matrix
+
+`net-tap` offers two distinct operational profiles tailored to the host platform:
+
+| Dimension / Capability | Profile 1: Linux Carrier-Grade Engine | Profile 2: macOS Darwin Tactical Lab Tier |
+| :--- | :--- | :--- |
+| **Target Use Case** | Production SPAN/TAP aggregation, Telco/5G core, zero-leak audit | Engineering laptops, lab switches, jump hosts, rapid triage |
+| **Egress Stealth Guarantee** | **Guaranteed Zero-Egress (0 bytes leaked)** verified via kernel drop counters | **Best-Effort Host Silencing** via Packet Filter (`pfctl`) anchor |
+| **Kernel Egress Mechanism** | `tc clsact` qdisc with `matchall action drop` (pref 1 or pref 100) | `pfctl` anchor `net_tap_<iface>`: `block drop out quick on <iface> all` |
+| **Selective Watermarking** | `SO_MARK 0x7a9` (decimal 1961) with `tc filter ... handle 0x7a9 fw pass` | Unmarked BPF packet injection (`/dev/bpf*` bypasses host PF rules) |
+| **Host Stack Silencing** | 38 non-destructive sysctls (IPv4 ARP, IPv6 SLAAC/DAD/MLD, IGMP) | Native macOS stack silencing via PF anchor; no sysctl wiping |
+| **Hardware Offload Tuning** | Disables 7 offloads (`gro`, `lro`, `tso`, `gso`, `rx`, `rxvlan`, `rx-vlan-filter`) | Preserves BSD interface flags; forces promiscuous mode |
+| **Hardware Queue / MTU** | Sets `txqueuelen 0`, elevates MTU up to 9216 (Jumbo envelope) | Standard BSD MTU; relies on hardware promiscuous buffer |
+| **Optical SFP/QSFP DDM** | Full DDM parsing via `ethtool -m` (dBm, mA, V, °C) | **Explicitly Rejected** (`-t sfp` fails with exit code 1) |
+| **Network Namespaces** | Supported via Linux `ip netns exec` | **Explicitly Rejected** (`-n/--netns` fails with exit code 1) |
+| **Session Locking** | `flock` on file descriptors with `.lock_master` & `.lock_<dev>` | Atomic directory creation (`mkdir .lock_<dev>.lockdir`) fallback |
+| **Packet Injection Engine** | Raw `AF_PACKET` sockets (`SOCK_RAW`) | Scapy `DarwinBPFSocket` wrapping `conf.L2socket` over `/dev/bpf*` |
+| **Routing / Neighbor Cache** | `ip route get`, `/proc/net/arp`, `ip neigh`, pre-flight raw frames | `route -n get`, `arp -an`, `ndp -an`, `ifconfig` link parsing |
+| **Offline DPI Analysis** | Full L2–L7 inspection, tunnels, PMTUD, JSON export | **100% Parity** (reads standard PCAP traces offline) |
+
+### macOS Darwin Architecture & Data Path
+
+```mermaid
+flowchart TD
+    subgraph Host ["macOS Darwin Host (Profile 2: Tactical Lab)"]
+        APP["net-tap CLI (Homebrew Bash >= 4.3)"]
+        PROBE["Active Probe Engine (Scapy BPF)"]
+        TCPDUMP["tcpdump (-B 4096 -w <file>)"]
+    end
+
+    subgraph XNU ["XNU Kernel & BSD Subsystem"]
+        BPF["/dev/bpf* Character Devices<br/>(Raw L2 Packet Injection & Tap Ingress)"]
+        PF["Packet Filter (pfctl)<br/>Anchor: net_tap_en0<br/>'block drop out quick on en0 all'"]
+        STACK["macOS Host Network Stack<br/>(mDNS, Bonjour, DHCP, ARP)"]
+    end
+
+    subgraph Link ["Network Interface (en0 / en5)"]
+        NIC["Physical / USB-C Ethernet NIC<br/>(Promiscuous Mode UP)"]
+    end
+
+    PROBE -->|"Inject Frames"| BPF
+    BPF -->|"Transmit Outbound"| NIC
+    NIC -->|"Capture Inbound"| BPF
+    BPF -->|"Ingress Frames"| TCPDUMP
+    STACK -.->|"Spontaneous Host Chatter"| PF
+    PF -- "Blocked at Anchor" --x NIC
+```
+
+---
+
 ## Key Features
 
 ### Hardware & Data Path Stealth
@@ -211,6 +268,14 @@ flowchart LR
   * Endpoint Hostnames: Parses DHCP Option 12 hostnames.
   * DNS & TLS SNI: Harvests top DNS/mDNS/LLMNR queries and extracts TLS Server Name Indication (SNI) from encrypted client handshakes.
 
+### macOS Darwin Tactical Lab Support
+For field engineers, lab triage, and staging audits on Apple Silicon or Intel macOS systems:
+* **Native Packet Filter (`pfctl`) Silencing**: Automatically scopes a dedicated PF anchor (`net_tap_<iface>`) containing `block drop out quick on <iface> all`, silencing spontaneous macOS mDNS/Bonjour (`224.0.0.251`), NetBIOS, and SLAAC emissions while capturing live traffic.
+* **Scapy BPF Layer-2 Injection**: Injects raw active audit frames directly through `/dev/bpf*` character devices via the `DarwinBPFSocket` driver, cleanly bypassing host PF filtering.
+* **BSD Routing & Neighbor Resolution**: Leverages macOS `route -n get`, `arp -an`, and `ndp -an` tables to discover gateways and L2 endpoints.
+* **Atomic Directory Session Locking**: Provides resilient mutual exclusion using atomic directory creation (`mkdir .lock_<dev>.lockdir`) when `util-linux flock` is unavailable.
+* **100% Offline DPI Parity**: Ingests, parses, and profiles PCAP traces with the same dual-stack carrier inspection depth as Linux.
+
 ---
 
 ## Privilege Model & Security
@@ -240,26 +305,30 @@ sudo capsh --user=$USER --inh=cap_net_admin,cap_net_raw --addamb=cap_net_admin,c
 sudo capsh --user=$USER --inh=cap_net_admin,cap_net_raw,cap_sys_admin --addamb=cap_net_admin,cap_net_raw,cap_sys_admin -- -c "net-tap on -n vrf-blue -i veth-tap -o /data/trace"
 ```
 
+#### Privilege Model on macOS Darwin
+macOS does not support POSIX ambient capabilities (`capsh`).
+* `net-tap on`, `net-tap off`, `net-tap probe`, and `net-tap clean` **strictly require `sudo`** on macOS to configure `pfctl` anchors, toggle interface promiscuous mode, and bind `/dev/bpf*` character devices.
+* `net-tap status`, `net-tap analyze`, and `net-tap list` can be executed by standard unprivileged users.
+
 ---
 
 ## System Requirements & Dependencies
 
-`net-tap` is designed exclusively for **Linux** kernels (3.10+; 4.19+ recommended for full `clsact` support). When running inside Docker or Podman, the container must be run with `--privileged` (or at minimum `--cap-add=NET_ADMIN --cap-add=NET_RAW`) to allow `tc` traffic control modifications and packet capturing.
+`net-tap` natively supports **Linux** (kernel 3.10+; 4.19+ recommended for full `clsact` support) and **macOS Darwin** (11.0 Big Sur through macOS 15 Sequoia). When running inside Docker or Podman, the container must be run with `--privileged` (or at minimum `--cap-add=NET_ADMIN --cap-add=NET_RAW`) to allow `tc` traffic control modifications and packet capturing.
 
-### Required Dependencies (Checked on startup)
+### Linux Requirements & Dependencies
 * `iproute2` (`ip`, `tc`, `ss`)
 * `tcpdump`
 * `ethtool`
 * `python3` (Core execution & active probing engine)
 * POSIX & Linux system utilities: `sysctl`, `dmesg`, `flock`, `gzip`, `mktemp`, `readlink`, `du`, `df`, `awk`, `sed`, `grep`, `find`, `stat`, `date`
+* Optional: `iptables` / `ip6tables` (`raw NOTRACK`), `tshark`, `mergecap`, `jq`
 
-### Optional Dependencies (Recommended)
-* `iptables` / `ip6tables`: Enables Netfilter raw table `NOTRACK` (bypassing connection tracking) and supplementary `OUTPUT DROP` hardening rules when available.
-* `tshark` (Wireshark CLI): Unlocks L4-L7 Deep Protocol Inspection (DNS, TLS SNI, SNMP, DHCP hostnames, OSPF, BGP). If installed, DPI can be bypassed via `NET_TAP_DISABLE_TSHARK=1` to force native `tcpdump` extraction.
-* `mergecap` (Wireshark suite): Enables automatic chronological merging of Dual-Port optical tap captures (`sfp0,sfp1`).
-* `jq`: Recommended for automated validation of `--json` analysis outputs in scripts or CI pipelines.
-* `python3-scapy`: Strictly required for active probing (`net-tap probe`) and generating synthetic test fixtures.
-* `python3-jsonschema`: Required for Draft-7 JSON schema verification and CI/CD compliance suites.
+### macOS Darwin Requirements & Dependencies
+* **GNU Bash $\ge 4.3$** (macOS default `/bin/bash` is version 3.2; install modern Bash via Homebrew)
+* `tcpdump`, `python3`, `pfctl` (built-in)
+* Python dependencies: `scapy` (`pip3 install scapy`)
+* Optional: `wireshark` (`brew install wireshark` for `tshark` and `mergecap`)
 
 ### Quick Package Installation
 
@@ -273,6 +342,10 @@ sudo apt-get update && sudo apt-get install -y --no-install-recommends \
 sudo dnf install -y \
   tcpdump iproute iproute-tc ethtool iptables wireshark-cli jq \
   python3-scapy python3-jsonschema
+
+# macOS (Homebrew)
+brew install bash tcpdump python3 jq
+pip3 install scapy jsonschema
 ```
 
 ---
@@ -329,63 +402,66 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | `-h` | `--help` | Displays the help menu and command usage. | - |
 
 #### Options for `net-tap on`
-| Flag | Long Option | Description | Default |
-| :--- | :--- | :--- | :--- |
-| `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (e.g. `eth1` or `sfp0,sfp1`). | None |
-| `-m` | `--mode` | Operational mode: `passive` (strict zero-egress stealth) or `active` (permits explicitly marked audit probes via `net-tap probe` while continuing to drop unsolicited OS emissions). | `passive` |
-| `-o`, `-d` | `--output-dir`, `--dir` | Target directory for PCAP traces and optical/link logs. Preflight requires $\ge \text{rotate-size} \times \text{rotate-count} \times N_{\text{interfaces}}$ MB free disk space. | `./captures` |
-| `-t` | `--type` | Hardware type: `ethernet` or `sfp`. | `ethernet` |
-| `-s` | `--speed` | Force link speed in Mbps for SFP transceivers (e.g. `1000`, `10000`). | Auto |
-| `-n` | `--netns` | Target Linux network namespace (`ip netns`). | Host namespace |
-| `-f` | `--filter` | BPF capture filter (e.g. `"tcp port 80"` or `"vlan or arp"`). Automatically expanded to match inside 802.1Q VLAN, QinQ (802.1ad), and MPLS encapsulated frames unless explicitly specified. Validated offline against Ethernet DLT before activation. | None (capture all) |
-| `-C` | `--rotate-size` | Maximum file size per rotating PCAP chunk in MB. | `100` |
-| `-W` | `--rotate-count` | Maximum number of rotating PCAP files to retain. | `10` |
-| `-z` | `--gzip` | Enable background gzip compression for rotated PCAP chunks. | Disabled |
-| `-w` | `--watchdog-threshold` | Storage partition utilization % threshold to trigger emergency auto-stop. | `85` |
-| `-D` | `--duration` | Auto-shutdown timer in seconds; tears down capture when timer expires. | Disabled |
+| Flag | Long Option | Description | Default | Platform |
+| :--- | :--- | :--- | :--- | :---: |
+| `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (e.g. `eth1`, `en0`, or `sfp0,sfp1`). | None | All |
+| `-m` | `--mode` | Operational mode: `passive` (strict zero-egress stealth) or `active` (permits explicitly marked audit probes via `net-tap probe` while continuing to drop unsolicited OS emissions). | `passive` | All |
+| `-o`, `-d` | `--output-dir`, `--dir` | Target directory for PCAP traces and optical/link logs. Preflight requires $\ge \text{rotate-size} \times \text{rotate-count} \times N_{\text{interfaces}}$ MB free disk space. | `./captures` | All |
+| `-t` | `--type` | Hardware type: `ethernet` or `sfp`. | `ethernet` | All (`sfp` Linux only) |
+| `-s` | `--speed` | Force link speed in Mbps for SFP transceivers (e.g. `1000`, `10000`). | Auto | Linux only |
+| `-n` | `--netns` | Target Linux network namespace (`ip netns`). | Host namespace | Linux only |
+| `-f` | `--filter` | BPF capture filter (e.g. `"tcp port 80"` or `"vlan or arp"`). Automatically expanded to match inside 802.1Q VLAN, QinQ (802.1ad), and MPLS encapsulated frames unless explicitly specified. Validated offline against Ethernet DLT before activation. | None (capture all) | All |
+| `-C` | `--rotate-size` | Maximum file size per rotating PCAP chunk in MB. | `100` | All |
+| `-W` | `--rotate-count` | Maximum number of rotating PCAP files to retain. | `10` | All |
+| `-z` | `--gzip` | Enable background gzip compression for rotated PCAP chunks. | Disabled | All |
+| `-w` | `--watchdog-threshold` | Storage partition utilization % threshold to trigger emergency auto-stop. | `85` | All |
+| `-D` | `--duration` | Auto-shutdown timer in seconds; tears down capture when timer expires. | Disabled | All |
+
+> [!NOTE]
+> On macOS, network namespaces (`-n / --netns`) and optical SFP telemetry (`-t sfp`) are strictly rejected with an actionable error. macOS DriverKit does not expose SFP I2C registers, and the XNU kernel does not support network namespaces.
 
 #### Options for `net-tap off`
-| Flag | Long Option | Description | Default |
-| :--- | :--- | :--- | :--- |
-| `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (or any constituent interface of an active multi-port session). | None |
-| `-n` | `--netns` | Target Linux network namespace (auto-discovered from tap state if omitted). | Auto |
+| Flag | Long Option | Description | Default | Platform |
+| :--- | :--- | :--- | :--- | :---: |
+| `-i` | `--interface` | **(Required)** Target interface(s), comma-separated (or any constituent interface of an active multi-port session). | None | All |
+| `-n` | `--netns` | Target Linux network namespace (auto-discovered from tap state if omitted). | Auto | Linux only |
 
 #### Options for `net-tap status`
-| Flag | Long Option | Description | Default |
-| :--- | :--- | :--- | :--- |
-| `-i` | `--interface` | **(Required)** Target network interface(s), comma-separated. | None |
-| `-n` | `--netns` | Target Linux network namespace (auto-discovered from active tap state if omitted; requires `sudo` when targeting isolated netns). | Auto (Host default) |
+| Flag | Long Option | Description | Default | Platform |
+| :--- | :--- | :--- | :--- | :---: |
+| `-i` | `--interface` | **(Required)** Target network interface(s), comma-separated. | None | All |
+| `-n` | `--netns` | Target Linux network namespace (auto-discovered from active tap state if omitted; requires `sudo` when targeting isolated netns). | Auto (Host default) | Linux only |
 
 #### Options for `net-tap probe`
-| Flag | Long Option | Description | Default |
-| :--- | :--- | :--- | :--- |
-| `-i` | `--interface` | **(Required)** Target single network interface (must have active session with `--mode active`). | None |
-| `-n` | `--netns` | Target Linux network namespace (auto-discovered if omitted). | Host namespace |
-| - | `--arp-scan` | Scan IPv4 subnet or host via ARP requests (e.g., `--arp-scan 192.168.1.0/24`; max allowed prefix is `/16` / 65,536 hosts). | `192.168.1.0/24` |
-| - | `--ndp-scan` | Scan IPv6 prefix, host, all-routers (`ff02::2`), or all-nodes (`ff02::1`) via ICMPv6 NS/RS/Echo. | `ff02::2` |
-| - | `--dhcp-discover`| Broadcast RFC 2131 DHCP Discover (IPv4) to audit DHCP servers. | None |
-| - | `--dhcp-discover6`, `--dhcp6-discover`| Transmit RFC 8415 DHCPv6 Solicit (IPv6 UDP 546->547) to audit DHCPv6 servers. | None |
-| - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 576-9000B) or unfragmented ICMPv6 Echo requests (IPv6: 1280-9000B). | `192.168.1.1` (IPv4) / `2001:db8::1` (IPv6) |
-| - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | `192.168.1.1` |
-| - | `--eapol-check`, `--eapol-probe` | Audit 802.1X Network Access Control via single EAPOL-Start frame. | None |
-| - | `--snmp-probe` | Probe SNMPv2c sysDescr.0 via single UDP 161 frame. | `192.168.1.1` |
-| - | `--dns-probe` | Probe DNS server version via CHAOS TXT `version.bind` query on UDP 53. | `192.168.1.1` |
-| - | `--nbns-probe` | Probe NetBIOS Name Service Node Status on UDP 137. | `255.255.255.255` |
-| `-p` | `--ports` | Target TCP port list for `--tcp-syn` as comma-separated integers (1-65535, e.g. `22,80,443`). | `22,80,443` |
-| - | `--src-ip` | Custom source IPv4 address for active probes. | Auto / Interface IP |
-| - | `--src-ip6` | Custom source IPv6 address for active probes. | Auto / GUA / LL |
-| - | `--src-mac` | Custom source MAC address for active probes. | Physical MAC |
-| - | `--community` | SNMP community string for `--snmp-probe`. | `public` |
-| - | `--vlan` | Inject probes tagged with IEEE 802.1Q VLAN ID(s) (single `100`, list `10,20`, or range `10-20`). | Untagged |
-| - | `--qinq` | Inject probes double-tagged with QinQ as `s_tag,c_tag` (1-4094, e.g., `100,200`). | None |
-| - | `--pcp` | IEEE 802.1p Priority Code Point (`0-7`) for 802.1Q / QinQ tagged frames. | `0` |
-| - | `--dei` | Drop Eligible Indicator bit (`0` or `1`) for 802.1Q / QinQ tagged frames. | `0` |
-| - | `--qinq-tpid` | Outer VLAN TPID / EtherType (`0x88a8`, `0x8100`, `0x9100`, `0x9200`). | `0x88a8` |
-| - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
-| - | `--fallback-mac-mode` | Fallback destination MAC mode for unresolved unicast targets: `multicast` (RFC 2464 all-nodes multicast `33:33:00:00:00:01`) or `broadcast` (`ff:ff:ff:ff:ff:ff`). | `multicast` |
-| - | `--rate` | Maximum probe transmission rate in packets per second (capped at 5000 pps; broadcast capped at 1000 pps). | `50` |
-| - | `--timeout` | Maximum probe duration timeout in seconds. | `5` |
-| - | `--audit-id` | Custom audit identifier for probe session correlation in JSONL log. | Auto |
+| Flag | Long Option | Description | Default | Platform |
+| :--- | :--- | :--- | :--- | :---: |
+| `-i` | `--interface` | **(Required)** Target single network interface (must have active session with `--mode active`). | None | All |
+| `-n` | `--netns` | Target Linux network namespace (auto-discovered if omitted). | Host namespace | Linux only |
+| - | `--arp-scan` | Scan IPv4 subnet or host via ARP requests (e.g., `--arp-scan 192.168.1.0/24`; max allowed prefix is `/16` / 65,536 hosts). | `192.168.1.0/24` | All |
+| - | `--ndp-scan` | Scan IPv6 prefix, host, all-routers (`ff02::2`), or all-nodes (`ff02::1`) via ICMPv6 NS/RS/Echo. | `ff02::2` | All |
+| - | `--dhcp-discover`| Broadcast RFC 2131 DHCP Discover (IPv4) to audit DHCP servers. | None | All |
+| - | `--dhcp-discover6`, `--dhcp6-discover`| Transmit RFC 8415 DHCPv6 Solicit (IPv6 UDP 546->547) to audit DHCPv6 servers. | None | All |
+| - | `--icmp-pmtu` | Probe Path MTU using stepped DF-bit Echo requests (IPv4: 576-9000B) or unfragmented ICMPv6 Echo requests (IPv6: 1280-9000B). | `192.168.1.1` (IPv4) / `2001:db8::1` (IPv6) | All |
+| - | `--tcp-syn` | Probe TCP port availability using single SYN packets (IPv4 or IPv6). | `192.168.1.1` | All |
+| - | `--eapol-check`, `--eapol-probe` | Audit 802.1X Network Access Control via single EAPOL-Start frame. | None | All |
+| - | `--snmp-probe` | Probe SNMPv2c sysDescr.0 via single UDP 161 frame. | `192.168.1.1` | All |
+| - | `--dns-probe` | Probe DNS server version via CHAOS TXT `version.bind` query on UDP 53. | `192.168.1.1` | All |
+| - | `--nbns-probe` | Probe NetBIOS Name Service Node Status on UDP 137. | `255.255.255.255` | All |
+| `-p` | `--ports` | Target TCP port list for `--tcp-syn` as comma-separated integers (1-65535, e.g. `22,80,443`). | `22,80,443` | All |
+| - | `--src-ip` | Custom source IPv4 address for active probes. | Auto / Interface IP | All |
+| - | `--src-ip6` | Custom source IPv6 address for active probes. | Auto / GUA / LL | All |
+| - | `--src-mac` | Custom source MAC address for active probes. | Physical MAC | All |
+| - | `--community` | SNMP community string for `--snmp-probe`. | `public` | All |
+| - | `--vlan` | Inject probes tagged with IEEE 802.1Q VLAN ID(s) (single `100`, list `10,20`, or range `10-20`). | Untagged | All |
+| - | `--qinq` | Inject probes double-tagged with QinQ as `s_tag,c_tag` (1-4094, e.g., `100,200`). | None | All |
+| - | `--pcp` | IEEE 802.1p Priority Code Point (`0-7`) for 802.1Q / QinQ tagged frames. | `0` | All |
+| - | `--dei` | Drop Eligible Indicator bit (`0` or `1`) for 802.1Q / QinQ tagged frames. | `0` | All |
+| - | `--qinq-tpid` | Outer VLAN TPID / EtherType (`0x88a8`, `0x8100`, `0x9100`, `0x9200`). | `0x88a8` | All |
+| - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled | All |
+| - | `--fallback-mac-mode` | Fallback destination MAC mode for unresolved unicast targets: `multicast` (RFC 2464 all-nodes multicast `33:33:00:00:00:01`) or `broadcast` (`ff:ff:ff:ff:ff:ff`). | `multicast` | All |
+| - | `--rate` | Maximum probe transmission rate in packets per second (capped at 5000 pps; broadcast capped at 1000 pps). | `50` | All |
+| - | `--timeout` | Maximum probe duration timeout in seconds. | `5` | All |
+| - | `--audit-id` | Custom audit identifier for probe session correlation in JSONL log. | Auto | All |
 
 #### Options for `net-tap analyze`
 | Flag | Long Option | Description | Default |
@@ -955,6 +1031,32 @@ sudo net-tap clean --force
 
 ---
 
+### 10. macOS Tactical Lab Capture & Telemetry
+
+When auditing lab infrastructure, staging switches, or test VLANs from a macOS engineer workstation:
+
+```bash
+# 1. Start passive capture on macOS interface (en0 or USB-C dongle en5)
+sudo /opt/homebrew/bin/bash bin/net-tap.sh on -i en0 -o ./captures
+
+# 2. Inspect port status, active files, and storage utilization
+/opt/homebrew/bin/bash bin/net-tap.sh status -i en0
+
+# 3. Inject watermarked active audit probes (BPF injection via Scapy)
+sudo /opt/homebrew/bin/bash bin/net-tap.sh probe -i en0 --arp-scan 192.168.1.0/24
+
+# 4. Stop capture and flush Packet Filter anchors
+sudo /opt/homebrew/bin/bash bin/net-tap.sh off -i en0
+
+# 5. Execute deep protocol analysis and generate JSON report
+bin/net-tap.sh analyze -d ./captures -j > lab_profile.json
+```
+
+> [!NOTE]
+> When `net-tap on` starts on macOS, it dynamically provisions a PF anchor named `net_tap_<iface>` injecting `block drop out quick on <iface> all`. This suppresses spontaneous macOS background chatter (Bonjour mDNS, NetBIOS, IPv6 SLAAC) while allowing Scapy BPF probes to inject audit frames directly into the physical link.
+
+---
+
 ## Sample Analysis Output
 
 ### Human-Readable Terminal Dashboard
@@ -1467,6 +1569,18 @@ All commits and pull requests trigger automated GitHub Actions workflows running
   sudo dnf install wireshark-cli
   ```
 * **High Dropped Packets on Busy Links:** If `status` reports interface drops, verify that your NIC supports maximum Rx ring buffers (`ethtool -g <iface>`), ensure disk write throughput can sustain line rate (or use ramdisk/tmpfs for `-o`), or filter unneeded packets using a BPF expression (`-f "vlan or arp or port 53"`).
+* **macOS GNU Bash Version Error:** If running `net-tap` fails with:
+  ```text
+  ERROR: Bash version 3.2.57(1)-release is not supported. net-tap requires GNU Bash >= 4.3.
+  ```
+  macOS ships with an outdated GNU Bash 3.2 from 2007. Install modern Bash via Homebrew (`brew install bash`) and invoke `net-tap` via `/opt/homebrew/bin/bash`:
+  ```bash
+  sudo /opt/homebrew/bin/bash bin/net-tap.sh on -i en0
+  ```
+* **macOS BPF Device Permission Denied:** If `net-tap probe` fails with `PermissionError: BPF device access on macOS requires root privileges (sudo)`:
+  Accessing raw Berkeley Packet Filter devices (`/dev/bpf*`) on Darwin requires root privileges. Ensure the probe command is executed with `sudo`.
+* **macOS Packet Filter (`pfctl`) Warnings:** If `pfctl` warns that Packet Filter is disabled:
+  `net-tap` automatically enables PF via `pfctl -E`. If an existing corporate MDM or third-party firewall manages PF rules, `net-tap` scopes its rules strictly inside an isolated anchor (`net_tap_<iface>`) and restores original anchor state upon teardown.
 
 ---
 

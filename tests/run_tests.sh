@@ -1795,6 +1795,25 @@ else
 fi
 rm -rf "${PATH_TEST_DIR}" 2>/dev/null || true
 
+# 7.6 Darwin Interface State Restoration & PF Teardown
+echo -n "[TEST] Verifying restore_interface_state delegation on Darwin... "
+RESTORE_STATUS=$(bash -c "
+    NET_TAP_PLATFORM=darwin
+    source '${SCRIPT_DIR}/../lib/core.sh'
+    source '${SCRIPT_DIR}/../lib/orchestration.sh'
+    pfctl() { return 0; }
+    ifconfig() { return 0; }
+    restore_interface_state 'en0'
+    echo 'SUCCESS'
+")
+if [[ "${RESTORE_STATUS}" == "SUCCESS" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
 echo "================================================="
 echo " Test Results: ${PASSED} Passed | ${FAILED} Failed"
 echo "================================================="

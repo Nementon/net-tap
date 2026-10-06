@@ -98,6 +98,12 @@ darwin_disable_pf_drop() {
     fi
 }
 
+platform_restore_interface_state() {
+    local iface="$1"
+    darwin_disable_pf_drop "${iface}"
+    ifconfig "${iface}" -promisc 2>/dev/null || true
+}
+
 platform_stat_owner() {
     local target="$1"
     stat -f "%u" "${target}" 2>/dev/null || python3 -c "import os, sys; print(os.stat(sys.argv[1]).st_uid)" "${target}" 2>/dev/null || echo "-1"

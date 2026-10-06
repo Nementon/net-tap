@@ -22,18 +22,36 @@ analyze_session() {
         exit 1
     fi
 
-    # Deduplicate: If merged traces exist, analyze only the merged trace to avoid double-counting
-    local files_to_analyze=()
-    local has_merged=0
+    # Deduplicate: If <timestamp>_merged_trace.pcap exists, analyze the merged trace
+    # and skip individual constituent files with matching prefix <timestamp>_
+    local merged_prefixes=()
     for f in "${pcap_files[@]}"; do
-        if [[ "${f}" =~ _merged_trace\.pcap ]]; then
-            has_merged=1
-            files_to_analyze+=("$f")
+        local bname
+        bname=$(basename "${f}")
+        if [[ "${bname}" =~ ^(.*)_merged_trace\.pcap ]]; then
+            merged_prefixes+=("${BASH_REMATCH[1]}")
         fi
     done
-    if [[ ${has_merged} -eq 0 ]]; then
-        files_to_analyze=("${pcap_files[@]}")
-    fi
+
+    local files_to_analyze=()
+    for f in "${pcap_files[@]}"; do
+        local bname
+        bname=$(basename "${f}")
+        if [[ "${bname}" =~ _merged_trace\.pcap ]]; then
+            files_to_analyze+=("$f")
+        else
+            local is_shadowed=0
+            for pfx in "${merged_prefixes[@]}"; do
+                if [[ "${bname}" == "${pfx}_"* ]]; then
+                    is_shadowed=1
+                    break
+                fi
+            done
+            if [[ ${is_shadowed} -eq 0 ]]; then
+                files_to_analyze+=("$f")
+            fi
+        fi
+    done
 
     log_info "Analyzing ${#files_to_analyze[@]} capture file(s) in ${C_BOLD}${target_dir}${C_RESET}..."
 
@@ -142,19 +160,19 @@ analyze_session() {
     done
 
     # Perform consolidated streaming dissection pass with per-packet boundary tracking
-    local qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count
+    local qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count ospf_count
     local ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah
     local tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans
     local tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order
     local lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag
-    read -r qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count \
+    read -r qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count ospf_count \
             ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah \
             tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans \
             tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order \
             lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag < <(
         awk '
             /^[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
-                in_qinq=0; in_arp=0; in_ndp=0; in_vxlan=0; in_gtp_u=0; in_gtp_c=0; in_geneve=0; in_gre=0; in_6in4=0; in_4in6=0; in_srv6=0; in_sctp=0; in_mpls=0; in_isis=0; in_bfd=0; in_pmtud=0
+                in_qinq=0; in_arp=0; in_ndp=0; in_vxlan=0; in_gtp_u=0; in_gtp_c=0; in_geneve=0; in_gre=0; in_6in4=0; in_4in6=0; in_srv6=0; in_sctp=0; in_mpls=0; in_isis=0; in_bfd=0; in_pmtud=0; in_ospf=0
                 in_lldp=0; in_cdp=0; in_stp=0; in_lacp=0; in_vrrp=0; in_hsrp=0; in_eapol=0; in_dhcp=0
                 in_hbh=0; in_rtg=0; in_frag=0; in_esp=0; in_ah=0; in_v4frag=0
             }
@@ -178,6 +196,7 @@ analyze_session() {
             /IS-IS|ethertype 0x00fe|dsap OSI \(0xfe\)/ { if (!in_isis) { isis++; in_isis=1 } }
             /(\.|[[:space:]])(3784|4784|3785|7784):|(\.|[[:space:]])(3784|4784|3785|7784) >|BFD/ { if (!in_bfd) { bfd++; in_bfd=1 } }
             /ICMP6, packet too big|need to frag/ { if (!in_pmtud) { pmtud++; in_pmtud=1 } }
+            /OSPFv2|OSPFv3|(proto|next-header) OSPF \(89\)|: OSPF/ { if (!in_ospf) { ospf++; in_ospf=1 } }
             /next-header (Options|HBH) \(0\)|: HBH/ { if (!in_hbh) { ipv6_hbh++; in_hbh=1 } }
             /next-header (Routing) \(43\)|: srcrt/ { if (!in_rtg) { ipv6_routing++; in_rtg=1 } }
             /next-header (Frag|Fragment) \(44\)|: frag \(|fragment header/ { if (!in_frag) { ipv6_frag++; in_frag=1 } }
@@ -205,7 +224,7 @@ analyze_session() {
             /EAPOL/ { if (!in_eapol) { eapol++; in_eapol=1 } }
             /BOOTP\/DHCP|DHCPv6|dhcp6|\.546 >|\.547 >/ { if (!in_dhcp) { dhcp++; in_dhcp=1 } }
             END {
-                print qinq+0, arp+0, ndp+0, ndp_ns+0, ndp_na+0, ndp_rs+0, ndp_ra+0, ndp_redirect+0, vxlan+0, gtp_u+0, gtp_c+0, geneve+0, gre+0, six_in_four+0, four_in_six+0, srv6+0, sctp+0, mpls+0, isis+0, bfd+0, pmtud+0, \
+                print qinq+0, arp+0, ndp+0, ndp_ns+0, ndp_na+0, ndp_rs+0, ndp_ra+0, ndp_redirect+0, vxlan+0, gtp_u+0, gtp_c+0, geneve+0, gre+0, six_in_four+0, four_in_six+0, srv6+0, sctp+0, mpls+0, isis+0, bfd+0, pmtud+0, ospf+0, \
                       ipv6_hbh+0, ipv6_routing+0, ipv6_frag+0, ipv6_esp+0, ipv6_ah+0, \
                       tcp_syn+0, tcp_synack+0, tcp_rst+0, tcp_fin+0, tcp_psh+0, tcp_urg+0, tcp_zero_win+0, tcp_retrans+0, \
                       tcp_mss+0, tcp_wscale+0, tcp_sack_perm+0, tcp_out_of_order+0, \
@@ -236,7 +255,7 @@ analyze_session() {
     # Bit-accurate L2 unicast check: Least significant bit of first octet must be 0: [02468aceACE]
     local unicast_macs
     unicast_macs=$(awk '{print $2, $4}' "${dump_file}" | tr -d ',' | tr ' ' '\n' | \
-        grep -iE '^[0-9a-f][02468ace]:([0-9a-f]{2}:){4}[0-9a-f]{2}$' | grep -ivE '^ff:ff:ff:ff:ff:ff$' | sort -u || true)
+        grep -iE '^[0-9a-f][02468ace]:([0-9a-f]{2}:){4}[0-9a-f]{2}$' | grep -ivE '^(ff:ff:ff:ff:ff:ff|00:00:00:00:00:00)$' | sort -u || true)
 
     local mac_count=0
     if [[ -n "${unicast_macs}" ]]; then
@@ -294,11 +313,64 @@ analyze_session() {
     local ip_count
     ip_count=$(wc -l < "${TEMP_DIR}/clean_ipv4.txt")
 
+    local dhcp_masks dhcp_routers
+    dhcp_masks=$(grep -oE "Subnet-Mask \([0-9]+\), length [0-9]+: [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "${dump_file}" 2>/dev/null | awk '{print $NF}' | sort -u || true)
+    dhcp_routers=$(grep -oE "(Default-Gateway|Router) \([0-9]+\), length [0-9]+: [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "${dump_file}" 2>/dev/null | awk '{print $NF}' | sort -u || true)
+
     if [[ "${ip_count}" -gt 0 ]]; then
-        echo -e "${C_CYAN}Inferred IPv4 Network Subnets (/24 approximations):${C_RESET}"
-        awk -F'.' '{print $1"."$2"."$3".0/24"}' "${TEMP_DIR}/clean_ipv4.txt" | sort | uniq -c | sort -nr | while read -r count subnet; do
-            echo -e "  Subnet: ${C_GREEN}${C_BOLD}${subnet}${C_RESET} (${count} active host IP(s) detected)"
-        done
+        if [[ -n "${dhcp_masks}" ]]; then
+            echo -e "${C_CYAN}Inferred IPv4 Network Subnets (via DHCP Option 1):${C_RESET}"
+            while IFS= read -r dmask; do
+                [[ -z "${dmask}" ]] && continue
+                awk -v mask="${dmask}" '
+                    function bit_and(a, b,   res, p, bit_a, bit_b) {
+                        res = 0; p = 1
+                        while (a > 0 && b > 0) {
+                            bit_a = a % 2; bit_b = b % 2
+                            if (bit_a == 1 && bit_b == 1) res += p
+                            a = int(a / 2); b = int(b / 2); p *= 2
+                        }
+                        return res
+                    }
+                    function mask_to_cidr(m,   oct, c, b, i) {
+                        split(m, oct, ".")
+                        c = 0
+                        for (i = 1; i <= 4; i++) {
+                            b = oct[i] + 0
+                            while (b > 0) {
+                                if (b % 2 == 1) c++
+                                b = int(b / 2)
+                            }
+                        }
+                        return c
+                    }
+                    {
+                        split($0, ip_oct, ".")
+                        split(mask, m_oct, ".")
+                        cidr = mask_to_cidr(mask)
+                        net = sprintf("%d.%d.%d.%d/%d",
+                                      bit_and(ip_oct[1]+0, m_oct[1]+0),
+                                      bit_and(ip_oct[2]+0, m_oct[2]+0),
+                                      bit_and(ip_oct[3]+0, m_oct[3]+0),
+                                      bit_and(ip_oct[4]+0, m_oct[4]+0),
+                                      cidr)
+                        subnets[net]++
+                    }
+                    END {
+                        for (s in subnets) {
+                            print subnets[s], s
+                        }
+                    }
+                ' "${TEMP_DIR}/clean_ipv4.txt" | sort -nr | while read -r count subnet; do
+                    echo -e "  Subnet: ${C_GREEN}${C_BOLD}${subnet}${C_RESET} (${count} active host IP(s) detected; Netmask: ${dmask})"
+                done
+            done <<< "${dhcp_masks}"
+        else
+            echo -e "${C_CYAN}Inferred IPv4 Network Subnets (/24 approximations):${C_RESET}"
+            awk -F'.' '{print $1"."$2"."$3".0/24"}' "${TEMP_DIR}/clean_ipv4.txt" | sort | uniq -c | sort -nr | while read -r count subnet; do
+                echo -e "  Subnet: ${C_GREEN}${C_BOLD}${subnet}${C_RESET} (${count} active host IP(s) detected)"
+            done
+        fi
 
         echo -e "\n${C_CYAN}Identified IPv4 Host IPs:${C_RESET}"
         head -n 20 "${TEMP_DIR}/clean_ipv4.txt" | sed 's/^/    /'
@@ -333,12 +405,16 @@ analyze_session() {
         }
     }' "${dump_file}" | sort -u || true)
     local all_gws
-    all_gws=$(echo -e "${gateways}\n${arp_gws}" | grep -v '^$' | grep -vE '(^(22[4-9]|23[0-9])\.|^255\.255\.255\.255$|^0\.|^127\.|^169\.254\.)' | sort -u || true)
+    all_gws=$(echo -e "${gateways}\n${arp_gws}\n${dhcp_routers}" | grep -v '^$' | grep -vE '(^(22[4-9]|23[0-9])\.|^255\.255\.255\.255$|^0\.|^127\.|^169\.254\.)' | sort -u || true)
     
     if [[ -n "${all_gws}" ]]; then
         while IFS= read -r gw; do
             [[ -z "${gw}" ]] && continue
-            echo -e "  Likely Gateway: ${C_GREEN}${C_BOLD}${gw}${C_RESET}"
+            local gw_note=""
+            if [[ -n "${dhcp_routers}" && "${dhcp_routers}" =~ (^|[[:space:]])"${gw}"($|[[:space:]]) ]]; then
+                gw_note=" [Verified via DHCP Option 3 / Router]"
+            fi
+            echo -e "  Likely Gateway: ${C_GREEN}${C_BOLD}${gw}${C_RESET}${gw_note}"
         done <<< "${all_gws}"
         gateways="${all_gws}"
     else
@@ -515,8 +591,18 @@ analyze_session() {
         echo -e "  ${C_CYAN}[FOUND] BFD Fault Detection:${C_RESET} ${bfd_count} frame(s) observed."
         tunnels_found=1
     fi
+    if [[ "${ospf_count}" -gt 0 ]]; then
+        echo -e "  ${C_GREEN}[FOUND] OSPF / OSPFv3 Routing Protocol:${C_RESET} ${ospf_count} frame(s) observed."
+        tunnels_found=1
+    fi
+    local discovered_mtus
+    discovered_mtus=$(grep -oE '(need to frag \(mtu [0-9]+\)|packet too big, mtu [0-9]+)' "${dump_file}" 2>/dev/null | grep -oE 'mtu [0-9]+' | awk '{print $2}' | sort -n -u || true)
     if [[ "${pmtud_count}" -gt 0 ]]; then
-        echo -e "  ${C_YELLOW}[WARN] Path MTU Discovery (PTB/Frag Needed):${C_RESET} ${pmtud_count} frame(s) observed."
+        local mtu_str=""
+        if [[ -n "${discovered_mtus}" ]]; then
+            mtu_str=" (Reported Next-Hop MTUs: $(echo "${discovered_mtus}" | paste -sd, -))"
+        fi
+        echo -e "  ${C_YELLOW}[WARN] Path MTU Discovery (PTB/Frag Needed):${C_RESET} ${pmtud_count} frame(s) observed.${mtu_str}"
         tunnels_found=1
     fi
     if [[ "${tunnels_found}" -eq 0 ]]; then
@@ -640,7 +726,7 @@ except Exception:
     # 4. INFRASTRUCTURE & SWITCH DISCOVERY PROTOCOLS
     # =========================================================================
     echo -e "\n${C_BOLD}======================================================================${C_RESET}"
-    echo -e "${C_MAGENTA}${C_BOLD} [4] INFRASTRUCTURE PROTOCOLS (LLDP, CDP, STP, FHRP)${C_RESET}"
+    echo -e "${C_MAGENTA}${C_BOLD} [4] INFRASTRUCTURE PROTOCOLS (LLDP, CDP, STP, FHRP, LACP)${C_RESET}"
     echo -e "${C_BOLD}======================================================================${C_RESET}"
 
     # LLDP (EtherType 0x88cc)
@@ -999,7 +1085,7 @@ if os.path.exists(dump_path):
                 continue
 
             # Check BOOTP / DHCP
-            if "BOOTP/DHCP, Reply" in line or ("dhcp" in probed_types and "BOOTP/DHCP" in line and ">" in line):
+            if "BOOTP/DHCP, Reply" in line or (".67 >" in line and "BOOTP/DHCP" in line):
                 dhcp_ip_m = re.search(r"Your-IP\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", line)
                 dhcp_mac_m = re.search(r"Client-Ethernet-Address\s+([0-9a-fA-F:]{17})", line)
                 if dhcp_ip_m and dhcp_mac_m:
@@ -1058,13 +1144,13 @@ if os.path.exists(dump_path):
 
             # Check EAPOL
             if "eapol_start" in probed_types or "eapol" in probed_types:
-                if "EAP" in line or "eapol" in line.lower() or "0x888e" in line:
+                if ("EAP-Request" in line or "EAP packet" in line or ("0x888e" in line and "01:80:c2:00:00:03" not in line)):
                     responses_received += 1
                     continue
 
             # Check SNMP responses (UDP port 161)
             if "snmp" in probed_types:
-                if ".161 >" in line or "snmp" in line.lower() or "GetResponse" in line:
+                if (".161 >" in line or "GetResponse" in line) and "GetRequest" not in line:
                     responses_received += 1
                     snmp_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.161\s+>", line)
                     if snmp_m:
@@ -1090,7 +1176,7 @@ if os.path.exists(dump_path):
 
             # Check DNS responses (UDP port 53)
             if "dns" in probed_types:
-                if ".53 >" in line or "domain >" in line or "version.bind" in line:
+                if ".53 >" in line or "domain >" in line:
                     responses_received += 1
                     dns_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.53\s+>", line)
                     if dns_m:
@@ -1116,7 +1202,7 @@ if os.path.exists(dump_path):
 
             # Check NBNS responses (UDP port 137)
             if "nbns" in probed_types:
-                if ".137 >" in line or "netbios-ns >" in line or "NBSTAT" in line:
+                if ".137 >" in line or "netbios-ns >" in line:
                     responses_received += 1
                     nb_m = re.search(r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.137\s+>", line)
                     if nb_m:
@@ -1191,6 +1277,7 @@ except Exception:
         
         to_jarr() {
             local input="$1"
+            local max_len="${2:-0}"
             if [[ -z "${input//[[:space:]]/}" ]]; then
                 echo "[]"
                 return
@@ -1200,6 +1287,9 @@ except Exception:
             local out="[" first=1 item
             while IFS= read -r item; do
                 [[ -z "${item}" ]] && continue
+                if [[ "${max_len}" -gt 0 && ${#item} -gt "${max_len}" ]]; then
+                    item="${item:0:${max_len}}"
+                fi
                 # Escape backslash and double quote
                 item="${item//\\/\\\\}"
                 item="${item//\"/\\\"}"
@@ -1253,6 +1343,7 @@ except Exception:
   "protocols": {
     "sctp": ${sctp_count:-0},
     "pmtud": ${pmtud_count:-0},
+    "next_hop_mtus": $(to_jarr "$discovered_mtus"),
     "ipv6_extension_headers": {
       "hop_by_hop": ${ipv6_hbh:-0},
       "routing": ${ipv6_routing:-0},
@@ -1285,19 +1376,20 @@ except Exception:
     "vrrp": ${vrrp_count:-0},
     "hsrp": ${hsrp_count:-0},
     "isis": ${isis_count:-0},
-    "bfd": ${bfd_count:-0}
+    "bfd": ${bfd_count:-0},
+    "ospf": ${ospf_count:-0}
   },
   "security_frames": {
     "eapol": ${eapol_count:-0},
     "dhcp": ${dhcp_count:-0}
   },
   "dpi": {
-    "snmp_community_strings": $(to_jarr "$snmp_strings"),
+    "snmp_community_strings": $(to_jarr "$snmp_strings" 256),
     "ospf_routers": $(to_jarr "$ospf_routers"),
     "bgp_asns": $(to_jarr "$bgp_asns"),
-    "dhcp_hostnames": $(to_jarr "$dhcp_hosts"),
-    "dns_queries": $(to_jarr "$dns_names"),
-    "tls_sni": $(to_jarr "$tls_sni")
+    "dhcp_hostnames": $(to_jarr "$dhcp_hosts" 253),
+    "dns_queries": $(to_jarr "$dns_names" 253),
+    "tls_sni": $(to_jarr "$tls_sni" 253)
   },
   "top_talkers": $(cat "${TEMP_DIR}/top_talkers.json" 2>/dev/null || echo '{"ipv4":[],"ipv6":[],"flows":[]}')$(if [[ -f "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
 }

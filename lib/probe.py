@@ -22,6 +22,7 @@ import ipaddress
 import json
 import os
 import random
+import signal
 import socket
 import struct
 import subprocess
@@ -50,6 +51,8 @@ except ImportError as err:
 SO_MARK = 36  # Linux SO_MARK socket option
 PROBE_FWMARK = 0x7a9  # 1961 - Net-Tap fwmark & wire watermark identifier
 SIOCGIFHWADDR = 0x8927  # Linux ioctl to get hardware MAC address
+ETH_P_ARP = 0x0806  # Ethernet protocol ARP (0x0806)
+ETH_P_IPV6 = 0x86dd  # Ethernet protocol IPv6 (0x86dd)
 
 MAC_RESOLUTION_CACHE = {}
 
@@ -119,7 +122,7 @@ def resolve_source_ip(iface: str, target_ip: str = "", explicit_src: str = None)
         pass
     if target_ip:
         try:
-            clean_tgt = target_ip.split("/")[0]
+            clean_tgt = target_ip.split("%")[0].split("/")[0]
             tgt_addr = ipaddress.ip_address(clean_tgt)
             if isinstance(tgt_addr, ipaddress.IPv4Address):
                 octets = str(tgt_addr).split(".")
@@ -132,6 +135,8 @@ def resolve_source_ip(iface: str, target_ip: str = "", explicit_src: str = None)
                     return f"{octets[0]}.{octets[1]}.{octets[2]}.253"
                 elif last in (253, 254):
                     return f"{octets[0]}.{octets[1]}.{octets[2]}.2"
+                elif last == 2:
+                    return f"{octets[0]}.{octets[1]}.{octets[2]}.3"
                 else:
                     return f"{octets[0]}.{octets[1]}.{octets[2]}.2"
         except Exception:
@@ -142,22 +147,23 @@ def resolve_source_ip(iface: str, target_ip: str = "", explicit_src: str = None)
 def resolve_source_ipv6(iface: str, target_ip: str = "", explicit_src: str = None) -> str:
     """Resolve source IPv6: explicit override -> interface GUA -> link-local fallback."""
     if explicit_src and explicit_src.strip():
-        return explicit_src.strip()
+        return explicit_src.split("%")[0].strip()
     if target_ip and ":" in target_ip:
         try:
-            tgt_addr = ipaddress.ip_address(target_ip.split("/")[0])
+            clean_tgt = target_ip.split("%")[0].split("/")[0]
+            tgt_addr = ipaddress.ip_address(clean_tgt)
             if isinstance(tgt_addr, ipaddress.IPv6Address) and not tgt_addr.is_link_local:
                 res = subprocess.run(["ip", "-6", "addr", "show", "dev", iface, "scope", "global"],
                                      capture_output=True, text=True, check=False)
                 for line in res.stdout.splitlines():
                     line = line.strip()
                     if line.startswith("inet6 "):
-                        ip_part = line.split()[1].split("/")[0]
+                        ip_part = line.split()[1].split("/")[0].split("%")[0]
                         if ip_part and not ip_part.lower().startswith("fe80"):
                             return ip_part
         except Exception:
             pass
-    return get_link_local_ipv6(iface)
+    return get_link_local_ipv6(iface).split("%")[0]
 
 
 def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
@@ -165,21 +171,49 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     vlan: int = None, qinq: tuple = None,
                     pcp: int = 0, dei: int = 0, qinq_tpid: int = 0x88a8) -> str:
     """Resolve destination MAC for target IP using neighbor cache with active pre-flight ARP/NDP fallback."""
-    cache_key = (iface, target_ip, is_v6, vlan, qinq, pcp, dei, qinq_tpid)
+    clean_target = target_ip.split("%")[0].strip() if target_ip else ""
+    cache_key = (iface, clean_target, is_v6, vlan, qinq, pcp, dei, qinq_tpid)
     if cache_key in MAC_RESOLUTION_CACHE:
         return MAC_RESOLUTION_CACHE[cache_key]
 
     try:
         try:
-            tgt_obj = ipaddress.ip_address(target_ip)
+            tgt_obj = ipaddress.ip_address(clean_target)
         except ValueError:
             return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
 
+        # Check for multicast/broadcast early
         if is_v6 and isinstance(tgt_obj, ipaddress.IPv6Address):
             if tgt_obj.is_multicast:
                 last4 = tgt_obj.packed[-4:]
                 return f"33:33:{last4[0]:02x}:{last4[1]:02x}:{last4[2]:02x}:{last4[3]:02x}"
+        elif not is_v6 and isinstance(tgt_obj, ipaddress.IPv4Address):
+            if str(tgt_obj) == "255.255.255.255":
+                return "ff:ff:ff:ff:ff:ff"
+            if tgt_obj.is_multicast:
+                octets = tgt_obj.packed
+                mac_b = bytes([0x01, 0x00, 0x5e, octets[1] & 0x7f, octets[2], octets[3]])
+                return ':'.join(f'{b:02x}' for b in mac_b)
 
+        # Route lookup: if target is routed via an off-link gateway, resolve the gateway's MAC (RFC 1812 / RFC 4291)
+        route_tgt = str(tgt_obj)
+        try:
+            cmd = ["ip", "-6" if is_v6 else "-4", "route", "get", route_tgt, "dev", iface]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                res = subprocess.run(["ip", "-6" if is_v6 else "-4", "route", "get", route_tgt],
+                                     capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                words = res.stdout.split()
+                if "via" in words:
+                    idx = words.index("via")
+                    if idx + 1 < len(words):
+                        gw_ip = words[idx + 1].split("%")[0]
+                        tgt_obj = ipaddress.ip_address(gw_ip)
+        except Exception:
+            pass
+
+        if is_v6 and isinstance(tgt_obj, ipaddress.IPv6Address):
             res = subprocess.run(["ip", "-6", "neigh", "show", "dev", iface, str(tgt_obj)],
                                  capture_output=True, text=True, check=False)
             for line in res.stdout.splitlines():
@@ -194,12 +228,13 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
             # Pre-flight ICMPv6 Neighbor Solicitation if src_mac provided
             if src_mac and src_ip:
                 try:
+                    src_ip_clean = src_ip.split("%")[0]
                     last_24 = tgt_obj.exploded[-7:].replace(":", "")
                     sn_mcast_ip = f"ff02::1:ff{last_24[:2]}:{last_24[2:]}"
                     sn_mcast_mac = f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
-                    ns = IPv6(src=src_ip, dst=sn_mcast_ip, fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_NS(tgt=str(tgt_obj)) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
+                    ns = IPv6(src=src_ip_clean, dst=sn_mcast_ip, fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_NS(tgt=str(tgt_obj)) / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                     ns_frame = wrap_l2(ns, dst_mac=sn_mcast_mac, src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as r_sock:
+                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_IPV6)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -224,13 +259,6 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
             return f"33:33:ff:{last_24[:2]}:{last_24[2:4]}:{last_24[4:6]}"
 
         elif not is_v6 and isinstance(tgt_obj, ipaddress.IPv4Address):
-            if str(tgt_obj) == "255.255.255.255":
-                return "ff:ff:ff:ff:ff:ff"
-            if tgt_obj.is_multicast:
-                octets = tgt_obj.packed
-                mac_b = bytes([0x01, 0x00, 0x5e, octets[1] & 0x7f, octets[2], octets[3]])
-                return ':'.join(f'{b:02x}' for b in mac_b)
-
             if os.path.exists("/proc/net/arp"):
                 with open("/proc/net/arp", "r") as f:
                     for line in f:
@@ -255,10 +283,10 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
             # Pre-flight ARP resolution if src_mac provided
             if src_mac:
                 try:
-                    s_ip = src_ip or "0.0.0.0"
+                    s_ip = (src_ip or "0.0.0.0").split("%")[0]
                     arp_req = ARP(op=1, hwsrc=src_mac, psrc=s_ip, pdst=str(tgt_obj))
                     arp_frame = wrap_l2(arp_req, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vlan, qinq=qinq, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
-                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as r_sock:
+                    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ARP)) as r_sock:
                         r_sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
                         r_sock.bind((iface, 0))
                         r_sock.settimeout(0.2)
@@ -386,9 +414,16 @@ def log_audit(audit_f, audit_id: str, probe_type: str, target: str, vlan: int, q
     if extra:
         entry.update(extra)
     audit_f.write(json.dumps(entry) + "\n")
+    audit_f.flush()
 
 
 def main():
+    def sig_handler(signum, frame):
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
     args = parse_args()
     iface = args.interface
     src_mac = get_iface_mac(iface, args.src_mac)
@@ -427,7 +462,7 @@ def main():
 
     # Prepare audit log
     os.makedirs(os.path.dirname(os.path.abspath(args.audit_file)), exist_ok=True)
-    audit_f = open(args.audit_file, "a", encoding="utf-8")
+    audit_f = open(args.audit_file, "a", encoding="utf-8", buffering=1)
 
     sock = create_probe_socket(iface)
     pacing_interval = 1.0 / max(1, args.rate)
@@ -441,9 +476,12 @@ def main():
                 break
 
             if args.type == "arp":
-                target_net = args.target or "192.168.1.0/24"
+                target_net = (args.target or "192.168.1.0/24").split("%")[0].strip()
                 try:
                     net = ipaddress.ip_network(target_net, strict=False)
+                    if isinstance(net, ipaddress.IPv6Network):
+                        sys.stderr.write(f"ERROR: ARP probing requires an IPv4 target, got IPv6 '{target_net}'.\n")
+                        sys.exit(1)
                     if net.num_addresses > 65536:
                         sys.stderr.write(f"ERROR: Target subnet '{target_net}' is too large ({net.num_addresses} addresses). Max allowed probe CIDR is /16.\n")
                         sys.exit(1)
@@ -452,7 +490,7 @@ def main():
                     sys.stderr.write(f"ERROR: Invalid IPv4 target '{target_net}': {err}\n")
                     sys.exit(1)
 
-                src_ip = args.src_ip if args.src_ip else "0.0.0.0"
+                src_ip = (args.src_ip if args.src_ip else "0.0.0.0").split("%")[0].strip()
                 for host in hosts_gen:
                     if time.monotonic() > deadline:
                         break
@@ -471,10 +509,13 @@ def main():
                     time.sleep(pacing_interval)
 
             elif args.type == "ndp":
-                target_str = args.target.strip() if args.target else "ff02::2"
+                target_str = (args.target.strip() if args.target else "ff02::2").split("%")[0]
                 if "/" in target_str:
                     try:
                         net = ipaddress.ip_network(target_str, strict=False)
+                        if isinstance(net, ipaddress.IPv4Network):
+                            sys.stderr.write(f"ERROR: NDP probing requires an IPv6 target, got IPv4 '{target_str}'.\n")
+                            sys.exit(1)
                         if net.prefixlen < 120:
                             offsets = [1, 2, 0xfe, 0xff, 0x100, 0x254]
                             probe_ips = [net.network_address + off for off in offsets]
@@ -484,17 +525,21 @@ def main():
                         sys.stderr.write(f"ERROR: Invalid IPv6 subnet '{target_str}': {err}\n")
                         sys.exit(1)
                 elif target_str in ("all-routers", "ff02::2", ""):
-                    probe_ips = ["ff02::2"]
+                    probe_ips = [ipaddress.IPv6Address("ff02::2")]
                 elif target_str in ("all-nodes", "ff02::1"):
-                    probe_ips = ["ff02::1"]
+                    probe_ips = [ipaddress.IPv6Address("ff02::1")]
                 else:
                     try:
-                        probe_ips = [ipaddress.IPv6Address(target_str)]
+                        tgt_v6 = ipaddress.ip_address(target_str)
+                        if isinstance(tgt_v6, ipaddress.IPv4Address):
+                            sys.stderr.write(f"ERROR: NDP probing requires an IPv6 target, got IPv4 '{target_str}'.\n")
+                            sys.exit(1)
+                        probe_ips = [tgt_v6]
                     except ValueError:
                         sys.stderr.write(f"ERROR: Invalid IPv6 target '{target_str}'.\n")
                         sys.exit(1)
 
-                src_v6 = resolve_source_ipv6(iface, target_str, args.src_ip6)
+                src_v6 = resolve_source_ipv6(iface, target_str, args.src_ip6).split("%")[0]
                 for tgt in probe_ips:
                     if time.monotonic() > deadline:
                         break
@@ -502,13 +547,13 @@ def main():
                     tgt_str = str(tgt)
                     if tgt_str == "ff02::2":
                         # RFC 4861 Sections 6.1.1 / 7.1.1: Hop Limit MUST be 255
-                        rs_src = args.src_ip6 if args.src_ip6 else src_ll
+                        rs_src = (args.src_ip6 if args.src_ip6 else src_ll).split("%")[0]
                         rs = IPv6(src=rs_src, dst="ff02::2", fl=PROBE_FWMARK, hlim=255) / ICMPv6ND_RS() / ICMPv6NDOptSrcLLAddr(lladdr=src_mac)
                         pkt = wrap_l2(rs, dst_mac="33:33:00:00:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                         dst_mac = "33:33:00:00:00:02"
                         ptype = "ndp_rs"
                     elif tgt_str == "ff02::1":
-                        echo_src = args.src_ip6 if args.src_ip6 else src_ll
+                        echo_src = (args.src_ip6 if args.src_ip6 else src_ll).split("%")[0]
                         echo = IPv6(src=echo_src, dst="ff02::1", fl=PROBE_FWMARK, hlim=255) / ICMPv6EchoRequest(id=PROBE_FWMARK, seq=seq)
                         pkt = wrap_l2(echo, dst_mac="33:33:00:00:00:01", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                         dst_mac = "33:33:00:00:00:01"
@@ -574,7 +619,7 @@ def main():
                 dhcp6_payload += struct.pack("!HHIII", 3, 12, 1, 0, 0)   # Opt 3: IA_NA
                 dhcp6_payload += struct.pack("!HHIII", 25, 12, 1, 0, 0)  # Opt 25: IA_PD (Prefix Delegation)
                 dhcp6_payload += struct.pack("!HH", 14, 0)               # Opt 14: Rapid Commit
-                dhcp6_src = args.src_ip6 if args.src_ip6 else src_ll
+                dhcp6_src = (args.src_ip6 if args.src_ip6 else src_ll).split("%")[0]
                 ip_udp = IPv6(src=dhcp6_src, dst="ff02::1:2", fl=PROBE_FWMARK) / UDP(sport=546, dport=547) / Raw(load=dhcp6_payload)
                 pkt = wrap_l2(ip_udp, dst_mac="33:33:00:01:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
@@ -588,26 +633,27 @@ def main():
                 time.sleep(pacing_interval)
 
             elif args.type == "pmtu":
-                is_v6 = ":" in (args.target or "")
+                clean_target = (args.target or "").split("%")[0].strip()
+                is_v6 = ":" in clean_target
                 if is_v6:
-                    target_ip = args.target or "2001:db8::1"
+                    target_ip = clean_target or "2001:db8::1"
                     try:
                         ipaddress.ip_address(target_ip)
                     except ValueError as err:
                         sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
                         sys.exit(1)
                     sizes = [1280, 1420, 1500, 2000, 4000, 9000]
-                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
+                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
-                    target_ip = args.target or "192.168.1.1"
+                    target_ip = clean_target or "192.168.1.1"
                     try:
                         ipaddress.ip_address(target_ip)
                     except ValueError as err:
                         sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
                         sys.exit(1)
                     sizes = [576, 1280, 1420, 1450, 1492, 1500, 2000, 4000, 9000]
-                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
+                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 for sz in sizes:
@@ -639,18 +685,19 @@ def main():
                     time.sleep(pacing_interval)
 
             elif args.type == "tcp_syn":
-                is_v6 = ":" in (args.target or "")
-                target_ip = args.target or ("2001:db8::1" if is_v6 else "192.168.1.1")
+                clean_target = (args.target or "").split("%")[0].strip()
+                is_v6 = ":" in clean_target
+                target_ip = clean_target or ("2001:db8::1" if is_v6 else "192.168.1.1")
                 try:
                     ipaddress.ip_address(target_ip)
                 except ValueError as err:
                     sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
                     sys.exit(1)
                 if is_v6:
-                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
+                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
-                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
+                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 raw_ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
@@ -698,7 +745,7 @@ def main():
 
             elif args.type == "snmp":
                 # Single-packet SNMPv2c sysDescr.0 GetRequest on UDP 161
-                target_ip = args.target or "192.168.1.1"
+                target_ip = (args.target or "192.168.1.1").split("%")[0].strip()
                 try:
                     ipaddress.ip_address(target_ip)
                 except ValueError as err:
@@ -706,10 +753,10 @@ def main():
                     sys.exit(1)
                 is_v6 = ":" in target_ip
                 if is_v6:
-                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
+                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
-                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
+                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 seq += 1
@@ -734,7 +781,7 @@ def main():
 
             elif args.type == "dns":
                 # Single-packet DNS CHAOS TXT version.bind query on UDP 53
-                target_ip = args.target or "192.168.1.1"
+                target_ip = (args.target or "192.168.1.1").split("%")[0].strip()
                 try:
                     ipaddress.ip_address(target_ip)
                 except ValueError as err:
@@ -742,10 +789,10 @@ def main():
                     sys.exit(1)
                 is_v6 = ":" in target_ip
                 if is_v6:
-                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6)
+                    src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 else:
-                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip)
+                    src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
                     dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 seq += 1
@@ -768,14 +815,17 @@ def main():
 
             elif args.type == "nbns":
                 # RFC 1002 NetBIOS Name Service Node Status Query on UDP 137
-                target_ip = args.target or "255.255.255.255"
+                target_ip = (args.target or "255.255.255.255").split("%")[0].strip()
                 try:
-                    ipaddress.ip_address(target_ip)
+                    tgt_obj = ipaddress.ip_address(target_ip)
+                    if isinstance(tgt_obj, ipaddress.IPv6Address):
+                        sys.stderr.write(f"ERROR: NBNS probing is only supported on IPv4, got IPv6 '{target_ip}'.\n")
+                        sys.exit(1)
                 except ValueError as err:
                     sys.stderr.write(f"ERROR: Invalid target IP '{target_ip}': {err}\n")
                     sys.exit(1)
                 is_bcast = (target_ip == "255.255.255.255")
-                src_ip = resolve_source_ip(iface, target_ip if not is_bcast else "", args.src_ip)
+                src_ip = resolve_source_ip(iface, target_ip if not is_bcast else "", args.src_ip).split("%")[0]
                 dst_mac = "ff:ff:ff:ff:ff:ff" if is_bcast else resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
 
                 seq += 1

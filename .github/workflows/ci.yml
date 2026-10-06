@@ -53,6 +53,16 @@ jobs:
         run: |
           sudo PYTHONDONTWRITEBYTECODE=1 tests/run_tests.sh
 
+      - name: Verify Packaging & Installation Lifecycle
+        run: |
+          sudo make install
+          make installcheck
+          sudo make uninstall
+
+      - name: Verify Clean Git Working Tree
+        run: |
+          git diff --exit-code
+
       - name: Normalize Artifact Permissions
         if: failure()
         run: |

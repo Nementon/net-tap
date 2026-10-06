@@ -23,7 +23,8 @@ run_probe() {
     fi
 
     local safe_iface="${IFACE//\//_}"
-    local safe_netns="${NETNS//\//_}"
+    local raw_netns="${NETNS:-}"
+    local safe_netns="${raw_netns//\//_}"
     local sfile="${STATE_FILE:-}"
     if [[ -z "${sfile}" ]]; then
         sfile="${STATE_DIR}/${safe_iface}.state"
@@ -54,19 +55,21 @@ run_probe() {
     trap 'release_lock' EXIT INT TERM
 
     local audit_id="${PROBE_AUDIT_ID:-probe_$(date +%s)_$$}"
-    local audit_file="${OUT_DIR}/${TIMESTAMP}_${safe_iface}_probe_audit.jsonl"
+    local out_dir="${OUT_DIR:-/tmp}"
+    local timestamp="${TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+    local audit_file="${out_dir}/${timestamp}_${safe_iface}_probe_audit.jsonl"
 
     local probe_vlans=""
     if [[ "${PROBE_AUTO_VLANS:-0}" -eq 1 ]]; then
         log_info "Auto-discovering active VLAN tags from capture ring buffer on ${IFACE}..."
         local discovered_vlans=""
-        for pf in "${OUT_DIR}"/*"${safe_iface}"*.pcap*; do
+        for pf in "${out_dir}"/*"${safe_iface}"*.pcap*; do
             [[ -f "${pf}" ]] || continue
             local v=""
             if [[ "${pf}" =~ \.gz$ ]]; then
-                v=$(gzip -dc "${pf}" 2>/dev/null | tcpdump -nn -e -c 10000 -r - 'vlan' 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
+                v=$(gzip -dc "${pf}" 2>/dev/null | tcpdump -nn -e -c 10000 -r - '(vlan or ether proto 0x88a8)' 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
             else
-                v=$(tcpdump -nn -e -c 10000 -r "${pf}" 'vlan' 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
+                v=$(tcpdump -nn -e -c 10000 -r "${pf}" '(vlan or ether proto 0x88a8)' 2>/dev/null | grep -oE '\bvlan [0-9]+\b' | awk '{print $2}' || true)
             fi
             if [[ -n "${v}" ]]; then
                 discovered_vlans="${discovered_vlans}"$'\n'"${v}"

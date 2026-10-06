@@ -8,6 +8,8 @@ export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_PATH="${SCRIPT_DIR}/../bin/net-tap.sh"
 FIXTURES_DIR="${SCRIPT_DIR}/fixtures"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/../lib/core.sh"
 
 echo "================================================="
 echo " Net-Tap: Carrier-Grade Test & Compliance Runner"
@@ -29,12 +31,16 @@ cleanup() {
     if [[ -n "${TMP_PRIV_DIR:-}" ]]; then rm -rf "${TMP_PRIV_DIR}" 2>/dev/null || true; fi
     if [[ -n "${EMPTY_DIR:-}" ]]; then rm -rf "${EMPTY_DIR}" 2>/dev/null || true; fi
     if [[ -n "${STATE_SEC_DIR:-}" ]]; then rm -rf "${STATE_SEC_DIR}" 2>/dev/null || true; fi
+    if [[ -n "${TEST_SFP_DIR:-}" ]]; then rm -rf "${TEST_SFP_DIR}" 2>/dev/null || true; fi
+    if [[ -n "${RESP_SENTINEL:-}" ]]; then rm -f "${RESP_SENTINEL}" 2>/dev/null || true; fi
     if [[ $exit_code -eq 0 ]]; then
         if [[ -n "${TEST_CAPTURE_DIR:-}" ]]; then rm -rf "${TEST_CAPTURE_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_MULTI_DIR:-}" ]]; then rm -rf "${TEST_MULTI_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_DUR_DIR:-}" ]]; then rm -rf "${TEST_DUR_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_EAP_DIR:-}" ]]; then rm -rf "${TEST_EAP_DIR}" 2>/dev/null || true; fi
         if [[ -n "${TEST_ACTIVE_DIR:-}" ]]; then rm -rf "${TEST_ACTIVE_DIR}" 2>/dev/null || true; fi
+        if [[ -n "${TEST_GZIP_DIR:-}" ]]; then rm -rf "${TEST_GZIP_DIR}" 2>/dev/null || true; fi
+        if [[ -n "${TEST_WATCHDOG_DIR:-}" ]]; then rm -rf "${TEST_WATCHDOG_DIR}" 2>/dev/null || true; fi
     else
         if [[ -n "${TEST_CAPTURE_DIR:-}" ]]; then
             echo "[DIAGNOSTIC] Preserving test capture dir for failure inspection: ${TEST_CAPTURE_DIR}" >&2
@@ -51,24 +57,34 @@ cleanup() {
         if [[ -n "${TEST_ACTIVE_DIR:-}" ]]; then
             echo "[DIAGNOSTIC] Preserving active audit dir for failure inspection: ${TEST_ACTIVE_DIR}" >&2
         fi
+        if [[ -n "${TEST_GZIP_DIR:-}" ]]; then
+            echo "[DIAGNOSTIC] Preserving gzip test dir for failure inspection: ${TEST_GZIP_DIR}" >&2
+        fi
+        if [[ -n "${TEST_WATCHDOG_DIR:-}" ]]; then
+            echo "[DIAGNOSTIC] Preserving watchdog test dir for failure inspection: ${TEST_WATCHDOG_DIR}" >&2
+        fi
     fi
     if [[ -n "${WPA_PID_FILE:-}" && -f "${WPA_PID_FILE}" ]]; then
-        kill "$(cat "${WPA_PID_FILE}")" 2>/dev/null || true
+        local wp
+        wp=$(cat "${WPA_PID_FILE}" 2>/dev/null || echo "")
+        if [[ -n "$wp" ]]; then safe_kill "$wp" "wpa_supplicant"; fi
         rm -f "${WPA_PID_FILE}" 2>/dev/null || true
     fi
     if [[ -n "${RESP_PID:-}" ]] && kill -0 "${RESP_PID}" 2>/dev/null; then
-        kill "${RESP_PID}" 2>/dev/null || true
+        safe_kill "${RESP_PID}" "python3"
         wait "${RESP_PID}" 2>/dev/null || true
     fi
     if [[ -n "${MOCK_PID:-}" ]] && kill -0 "${MOCK_PID}" 2>/dev/null; then
-        kill "${MOCK_PID}" 2>/dev/null || true
+        safe_kill "${MOCK_PID}" "sleep"
         wait "${MOCK_PID}" 2>/dev/null || true
     fi
     if [[ -n "${WPA_CONF_FILE:-}" && -f "${WPA_CONF_FILE}" ]]; then
         rm -f "${WPA_CONF_FILE}" 2>/dev/null || true
     fi
     if [[ -n "${WPA_PID_CTRL:-}" && -f "${WPA_PID_CTRL}" ]]; then
-        kill "$(cat "${WPA_PID_CTRL}")" 2>/dev/null || true
+        local wp
+        wp=$(cat "${WPA_PID_CTRL}" 2>/dev/null || echo "")
+        if [[ -n "$wp" ]]; then safe_kill "$wp" "wpa_supplicant"; fi
         rm -f "${WPA_PID_CTRL}" 2>/dev/null || true
     fi
     if [[ -n "${WPA_CONF_CTRL:-}" && -f "${WPA_CONF_CTRL}" ]]; then
@@ -211,7 +227,8 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-kill "${MOCK_PID}" 2>/dev/null || true
+safe_kill "${MOCK_PID}" "sleep"
+MOCK_PID=""
 rm -rf "${MOCK_STATE_DIR}"
 
 # --- 2. Input Validation Tests ---
@@ -247,7 +264,12 @@ assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i
 assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "100,5000"
 assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" probe -i lo --arp-scan --qinq "0,100"
 assert_fail "Invalid source IPv4 address format" "$BIN_PATH" probe -i lo --arp-scan --src-ip "notanip"
+assert_fail "Invalid source IPv6 address format" "$BIN_PATH" probe -i lo --arp-scan --src-ip6 "notanip6"
 assert_fail "Invalid source MAC address format" "$BIN_PATH" probe -i lo --arp-scan --src-mac "notamac"
+assert_fail "PCP must be an integer between 0 and 7" "$BIN_PATH" probe -i lo --arp-scan --pcp 8
+assert_fail "PCP must be an integer between 0 and 7" "$BIN_PATH" probe -i lo --arp-scan --pcp -1
+assert_fail "DEI must be 0 or 1" "$BIN_PATH" probe -i lo --arp-scan --dei 2
+assert_fail "QinQ TPID must be a hex or decimal integer" "$BIN_PATH" probe -i lo --arp-scan --qinq-tpid "invalid"
 
 TMP_SYM_DIR=$(mktemp -d /tmp/net-tap-symtest.XXXXXX)
 ln -s "${TMP_SYM_DIR}" "${TMP_SYM_DIR}_link"
@@ -369,6 +391,33 @@ assert_fail "does not exist" "$BIN_PATH" analyze -d /tmp/net-tap-nonexistent-$$
 EMPTY_DIR=$(mktemp -d /tmp/net-tap-test-empty.XXXXXX)
 assert_fail "No PCAP trace files found" "$BIN_PATH" analyze -d "$EMPTY_DIR"
 
+# --- 4b. SFP Transceiver DDM Optical Diagnostics Analysis ---
+echo -n "[TEST] Verifying SFP DDM optical diagnostics telemetry in analyzer... "
+TEST_SFP_DIR=$(mktemp -d /tmp/net-tap-test-sfp.XXXXXX)
+cp "$FIXTURES_DIR/synthetic_carrier_trace.pcap" "$TEST_SFP_DIR/20261005_120000_sfp0_trace.pcap"
+cat << 'EOF' > "$TEST_SFP_DIR/20261005_120000_sfp0_sfp_ddm.txt"
+Receiver signal average optical power : 0.50 mW / -3.01 dBm
+Optical receive power                 : 0.52 mW
+Laser output power                    : 1.20 mW / 0.79 dBm
+Laser bias current                    : 6.50 mA
+Rx LOS                                : No
+Tx fault                              : No
+Module temperature                    : 28.50 degrees C
+Module voltage                        : 3.32 V
+EOF
+SFP_REPORT=$("$BIN_PATH" analyze -d "$TEST_SFP_DIR" 2>/dev/null || true)
+if echo "$SFP_REPORT" | grep -q "SFP Optical Diagnostics Detected:" && \
+   echo "$SFP_REPORT" | grep -q "Laser output power" && \
+   echo "$SFP_REPORT" | grep -q "Optical receive power"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (analyzer did not extract expected SFP DDM metrics)"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "$TEST_SFP_DIR" 2>/dev/null || true
+TEST_SFP_DIR=""
+
 # --- 5. Analyzer Engine & Synthetic Dual-Stack Fixtures ---
 if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; then
     assert_success "$BIN_PATH" analyze -d "$FIXTURES_DIR"
@@ -431,9 +480,9 @@ if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; 
         assert_jq '.protocols.tcp_flags.urg > 0'
         assert_jq '.protocols.tcp_flags.zero_window >= 1'
         assert_jq '.protocols.tcp_flags.retransmission >= 1'
-        assert_jq '.protocols.ipv6_extension_headers.hop_by_hop == 1'
+        assert_jq '.protocols.ipv6_extension_headers.hop_by_hop == 2'
         assert_jq '.protocols.ipv6_extension_headers.routing == 1'
-        assert_jq '.protocols.ipv6_extension_headers.fragment == 1'
+        assert_jq '.protocols.ipv6_extension_headers.fragment == 3'
         assert_jq '.protocols.ipv6_extension_headers.esp == 1'
         assert_jq '.protocols.ipv6_extension_headers.ah == 1'
         assert_jq '.protocols.tcp_options.mss == 1'
@@ -1008,7 +1057,8 @@ else:
 " 2>/dev/null || echo "ERROR")
 
         if [[ -f "${WPA_PID_CTRL}" ]]; then
-            kill "$(cat "${WPA_PID_CTRL}")" 2>/dev/null || true
+            wp=$(cat "${WPA_PID_CTRL}" 2>/dev/null || echo "")
+            if [[ -n "$wp" ]]; then safe_kill "$wp" "wpa_supplicant"; fi
             rm -f "${WPA_PID_CTRL}"
         fi
         rm -f "${WPA_CONF_CTRL}"
@@ -1101,7 +1151,8 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
         sleep 0.5
 
         if [[ -f "${WPA_PID_FILE}" ]]; then
-            kill "$(cat "${WPA_PID_FILE}")" 2>/dev/null || true
+            wp=$(cat "${WPA_PID_FILE}" 2>/dev/null || echo "")
+            if [[ -n "$wp" ]]; then safe_kill "$wp" "wpa_supplicant"; fi
             rm -f "${WPA_PID_FILE}"
         fi
         rm -f "${WPA_CONF_FILE}"
@@ -1235,6 +1286,41 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
     TEST_DUR_DIR=""
     sleep 0.3
 
+    # 6.9b Disk Watchdog Threshold Shutdown Verification (-w 1)
+    echo "[TEST] Verifying emergency disk watchdog shutdown (-w 1)..."
+    TEST_WATCHDOG_DIR=$(mktemp -d /tmp/net-tap-test-watchdog.XXXXXX)
+    assert_success "$BIN_PATH" on -n "${TEST_NS}" -i veth-tap1 -w 1 -o "${TEST_WATCHDOG_DIR}"
+    echo -n "[TEST] Waiting for disk watchdog worker to trigger emergency shutdown... "
+    watchdog_success=0
+    for _ in $(seq 1 40); do
+        if "$BIN_PATH" status -n "${TEST_NS}" -i veth-tap1 2>&1 | grep -qi "Not running"; then
+            watchdog_success=1
+            break
+        fi
+        sleep 0.2
+    done
+    if [[ $watchdog_success -eq 1 ]]; then
+        echo "PASSED (session automatically terminated by disk watchdog)"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (session still active after watchdog threshold breached)"
+        FAILED=$((FAILED + 1))
+        "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap1 >/dev/null 2>&1 || true
+    fi
+    rm -rf "${TEST_WATCHDOG_DIR}" 2>/dev/null || true
+    TEST_WATCHDOG_DIR=""
+    sleep 0.3
+
+    # 6.9c PCAP Gzip Compression Verification (-z)
+    echo "[TEST] Verifying PCAP gzip compression mode (-z)..."
+    TEST_GZIP_DIR=$(mktemp -d /tmp/net-tap-test-gzip.XXXXXX)
+    assert_success "$BIN_PATH" on -n "${TEST_NS}" -i veth-tap1 -z -o "${TEST_GZIP_DIR}"
+    assert_success "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap1
+    assert_success "$BIN_PATH" analyze -d "${TEST_GZIP_DIR}"
+    rm -rf "${TEST_GZIP_DIR}" 2>/dev/null || true
+    TEST_GZIP_DIR=""
+    sleep 0.3
+
     # 6.10 Active Probing & Selective Egress Verification (--mode active & probe)
     echo "[TEST] Running active probing & selective egress verification (--mode active & probe)..."
     TEST_ACTIVE_DIR=$(mktemp -d /tmp/net-tap-test-active.XXXXXX)
@@ -1276,6 +1362,8 @@ sendp(req_pkt, iface='veth-peer', count=1, verbose=0)
     fi
 
     # Start responder on veth-peer in python
+    RESP_SENTINEL=$(mktemp /tmp/net_tap_resp_ready.XXXXXX)
+    rm -f "${RESP_SENTINEL}"
     ip netns exec "${TEST_NS}" python3 -c "
 import sys, time
 from scapy.all import sniff, sendp, Ether, Dot1Q, ARP, IP, IPv6, ICMP, TCP, UDP, BOOTP, DHCP, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6EchoRequest, Raw
@@ -1315,10 +1403,22 @@ def process_pkt(pkt):
     if reply is not None:
         sendp(reply, iface='veth-peer', count=1, verbose=0)
 
-sniff(iface='veth-peer', timeout=60, prn=process_pkt)
+def on_started():
+    try:
+        with open('${RESP_SENTINEL}', 'w') as sf:
+            sf.write('ready\n')
+    except Exception:
+        pass
+
+sniff(iface='veth-peer', timeout=60, prn=process_pkt, started_callback=on_started)
 " &
     RESP_PID=$!
-    sleep 0.4
+    waited=0
+    while [[ ! -f "${RESP_SENTINEL}" && $waited -lt 50 ]]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    rm -f "${RESP_SENTINEL}" 2>/dev/null || true
 
     # Execute active probes
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --arp-scan 192.0.2.99/32 --rate 50
@@ -1340,8 +1440,9 @@ sniff(iface='veth-peer', timeout=60, prn=process_pkt)
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --nbns-probe 192.0.2.99
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --tcp-syn 192.0.2.99 --src-ip 192.0.2.10 -p 80
 
-    kill "${RESP_PID}" 2>/dev/null || true
+    safe_kill "${RESP_PID}" "python3"
     wait "${RESP_PID}" 2>/dev/null || true
+    RESP_PID=""
 
     # Stop active tap session
     assert_success "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap

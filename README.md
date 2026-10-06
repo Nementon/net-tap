@@ -13,7 +13,7 @@
 
 ### Two Operating Modes:
 * **Passive Stealth Mode (default)**: Enforces an unconditional hardware and kernel egress lock (via `tc clsact`, Netfilter `raw` drops, and 36 non-destructive sysctls) guaranteeing **0 outbound bytes** leak onto the monitored wire while capturing full line-rate traffic.
-* **Active Probing Mode (`--mode active`)**: Combines continuous passive recording with precision active auditing (`--arp-scan`, `--ndp-scan`, `--dhcp-discover`, `--dhcp-discover6`, `--icmp-pmtu`, `--tcp-syn`). Outbound probes are strictly tagged with watermarks (`0x7a9` / 1961), while all spontaneous host OS chatter (such as unsolicited kernel TCP RSTs or IPv6 SLAAC/DAD packets) is completely blocked at the kernel egress gate.
+* **Active Probing Mode (`--mode active`)**: Combines continuous passive recording with precision active auditing (`--arp-scan`, `--ndp-scan`, `--dhcp-discover`, `--dhcp-discover6`, `--icmp-pmtu`, `--tcp-syn`, `--eapol-check`, `--snmp-probe`, `--dns-probe`, `--nbns-probe`). Outbound probes are strictly tagged with watermarks (`0x7a9` / 1961), while all spontaneous host OS chatter (such as unsolicited kernel TCP RSTs or IPv6 SLAAC/DAD packets) is completely blocked at the kernel egress gate.
 
 ---
 
@@ -45,6 +45,9 @@
     - [Probe 3: DHCP Discovery (RFC 2131 DHCPv4 & RFC 8415 DHCPv6)](#probe-3-dhcp-discovery-rfc-2131-dhcpv4--rfc-8415-dhcpv6)
     - [Probe 4: Stepped Path MTU Discovery (PMTUD)](#probe-4-stepped-path-mtu-discovery-pmtud)
     - [Probe 5: Lightweight TCP SYN Probing](#probe-5-lightweight-tcp-syn-probing)
+    - [IEEE 802.1X EAPOL-Start Audit (--eapol-check)](#ieee-8021x-eapol-start-audit---eapol-check)
+    - [Infrastructure Service Fingerprinting (--snmp-probe, --dns-probe, --nbns-probe)](#infrastructure-service-fingerprinting---snmp-probe---dns-probe---nbns-probe)
+    - [Source Identity Overrides & Pre-Flight Neighbor Resolution](#source-identity-overrides--pre-flight-neighbor-resolution)
     - [Smart Passive-to-Active Discovery (--auto-vlans)](#smart-passive-to-active-discovery---auto-vlans)
   - [8. Session Enumeration & Fleet Management (list)](#8-session-enumeration--fleet-management-list)
   - [9. Disaster Recovery & Orphan Reconciler (clean)](#9-disaster-recovery--orphan-reconciler-clean)
@@ -243,10 +246,10 @@ sudo capsh --user=$USER --inh=cap_net_admin,cap_net_raw,cap_sys_admin --addamb=c
 * `tcpdump`
 * `ethtool`
 * `python3` (Core execution & active probing engine)
-* `iptables` / `ip6tables` (Netfilter raw table NOTRACK and drop rules when available)
 * POSIX & Linux system utilities: `sysctl`, `dmesg`, `flock`, `gzip`, `mktemp`, `readlink`, `du`, `df`, `awk`, `sed`, `grep`, `find`, `stat`, `date`
 
 ### Optional Dependencies (Recommended)
+* `iptables` / `ip6tables`: Enables Netfilter raw table `NOTRACK` (bypassing connection tracking) and supplementary `OUTPUT DROP` hardening rules when available.
 * `tshark` (Wireshark CLI): Unlocks L4-L7 Deep Protocol Inspection (DNS, TLS SNI, SNMP, DHCP hostnames, OSPF, BGP). If installed, DPI can be bypassed via `NET_TAP_DISABLE_TSHARK=1` to force native `tcpdump` extraction.
 * `mergecap` (Wireshark suite): Enables automatic chronological merging of Dual-Port optical tap captures (`sfp0,sfp1`).
 * `jq`: Recommended for automated validation of `--json` analysis outputs in scripts or CI pipelines.
@@ -325,7 +328,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | `-n` | `--netns` | Target Linux network namespace (`ip netns`). | Host namespace |
 | `-f` | `--filter` | BPF capture filter (e.g. `"tcp port 80"` or `"vlan or arp"`). Automatically expanded to match inside 802.1Q VLAN, QinQ (802.1ad), and MPLS encapsulated frames unless explicitly specified. Validated offline against Ethernet DLT before activation. | None (capture all) |
 | `-C` | `--rotate-size` | Maximum file size per rotating PCAP chunk in MB. | `100` |
-| `-W` | `--rotate-count`| Maximum number of rotating PCAP files to retain. | `10` |
+| `-W` | `--rotate-count` | Maximum number of rotating PCAP files to retain. | `10` |
 | `-z` | `--gzip` | Enable background gzip compression for rotated PCAP chunks. | Disabled |
 | `-w` | `--watchdog-threshold` | Storage partition utilization % threshold to trigger emergency auto-stop. | `85` |
 | `-D` | `--duration` | Auto-shutdown timer in seconds; tears down capture when timer expires. | Disabled |
@@ -366,7 +369,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | - | `--qinq` | Inject probes double-tagged with QinQ as `s_tag,c_tag` (1-4094, e.g., `100,200`). | None |
 | - | `--pcp` | IEEE 802.1p Priority Code Point (`0-7`) for 802.1Q / QinQ tagged frames. | `0` |
 | - | `--dei` | Drop Eligible Indicator bit (`0` or `1`) for 802.1Q / QinQ tagged frames. | `0` |
-| - | `--qinq-tpid` | Outer VLAN TPID / EtherType (`0x88a8`, `0x9100`, `0x9200`). | `0x88a8` |
+| - | `--qinq-tpid` | Outer VLAN TPID / EtherType (`0x88a8`, `0x8100`, `0x9100`, `0x9200`). | `0x88a8` |
 | - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
 | - | `--rate` | Maximum probe transmission rate in packets per second (capped at 5000 pps; broadcast capped at 1000 pps). | `50` |
 | - | `--timeout` | Maximum probe duration timeout in seconds. | `5` |
@@ -398,7 +401,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | `NET_TAP_LIB_DIR` | Custom directory containing `core.sh`, `orchestration.sh`, `analyzer.sh`, `probe.sh`, and `probe.py`. | `/usr/local/lib/net-tap` or `../lib` |
 | `TMPDIR` | Custom temporary directory for analyzer header caching and parsing. | `/tmp` |
 | `COMPRESS_PCAPS` | When set to `1`, forces gzip compression on rotated PCAP chunks (`-z`). | `0` |
-| `JSON_OUT` | When set to `1`, forces `analyze` to emit JSON output (`--json`). | `0` |
+| `JSON_OUT` | When set to `1`, forces `analyze` and `list` to emit JSON output (`--json` / `-j`). | `0` |
 | `BPF_FILTER` | Default BPF filter applied to captures if `-f` is omitted. | None |
 | `NET_TAP_DISABLE_TSHARK` | When set to `1`, forces offline analyzer to use native `tcpdump` engine instead of `tshark`. | `0` |
 
@@ -1246,7 +1249,7 @@ Every active capture session creates a predictable hierarchy of state, telemetry
 | :--- | :--- | :--- |
 | `${STATE_DIR}/[<netns>__]<iface>.state` | `net-tap on` | Shell serialized state file (`declare -p`) storing active capture PIDs, ring-buffer parameters, start timestamp, original NIC offloads, stealth sysctl states, and operational mode (`passive` or `active`). |
 | `${STATE_DIR}/.lock_<iface>` & `.lock_master` | `net-tap on` | Dynamic non-blocking file locks used to serialize operations and prevent conflicting concurrent tap sessions on the same interface. |
-| `<dir>/<timestamp>_<iface>_<seq>.pcap` (or `.pcap.gz`) | `tcpdump` | Rolling ring-buffer PCAP chunks formatted according to libpcap/pcap-ng standards. |
+| `<dir>/<timestamp>_<iface>_trace.pcap[0-9]*` (or `.gz`) | `tcpdump` | Rolling ring-buffer PCAP chunks formatted according to libpcap/pcap-ng standards. |
 | `<dir>/<timestamp>_<iface>_dmesg.log` | Host daemon | Continuous kernel ring buffer diagnostics tracking physical transceiver SFP link-flaps, carrier state changes, and PHY errors (host namespace only). |
 | `<dir>/<timestamp>_<iface>_link_events.log` | Host daemon | Real-time `ip monitor link` log capturing carrier up/down transitions, MTU adjustments, and link operational states. |
 | `<dir>/<timestamp>_<iface>_tcpdump.log` | `tcpdump` | Standard error log capturing `tcpdump` initialization, packet drops at the socket buffer, and filter drop counts. |

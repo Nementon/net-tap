@@ -12,7 +12,7 @@ try:
         ICMPv6NDOptSrcLLAddr, ICMPv6NDOptMTU, ICMPv6NDOptRDNSS, ICMPv6ND_NS, ICMPv6ND_NA,
         ICMPv6ND_RS, ICMPv6PacketTooBig, ICMPv6ND_Redirect,
         VXLAN, STP, Dot3, LLC, SNAP, wrpcap, Raw, DNS, DNSQR,
-        RouterAlert, IPv6ExtHdrHopByHop
+        RouterAlert, IPv6ExtHdrHopByHop, IPv6ExtHdrRouting, IPv6ExtHdrFragment
     )
     from scapy.layers.inet6 import ICMPv6MLReport2, ICMPv6MLDMultAddrRec
     from scapy.layers.tls.all import TLS, TLSClientHello, TLS_Ext_ServerName, ServerName
@@ -40,6 +40,12 @@ packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / Dot1Q(v
 
 # 1c. Provider Backbone Bridge (802.1ah / Mac-in-Mac - 0x88e7)
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x88e7) / Raw(load=b"\x00\x04\x00\x00\x00\x01\x02\x00\x00\x00\x00\x03\x02\x00\x00\x00\x00\x04\x08\x00") / IP(src="10.80.0.1", dst="10.80.0.2") / UDP(sport=8000, dport=8000))
+
+# 1d. MTU Boundary Frames (Runt <64B, 1514B Ethernet MTU, 1518B 802.1Q MTU, 9216B Jumbo Envelope)
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x1234) / Raw(load=b"\x00"*20))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src="10.50.0.1", dst="10.50.0.2") / TCP(sport=60000, dport=80, flags="A") / Raw(load=b"E" * (1514 - 14 - 20 - 20)))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / Dot1Q(vlan=250) / IP(src="10.50.0.1", dst="10.50.0.2") / TCP(sport=60001, dport=80, flags="A") / Raw(load=b"F" * (1518 - 18 - 20 - 20)))
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / Dot1Q(vlan=501) / IP(src="10.50.0.1", dst="10.50.0.2") / UDP(sport=9998, dport=9998) / Raw(load=b"J" * (9216 - 18 - 20 - 8)))
 
 # 2. ARP request & reply
 packets.append(Ether(src="02:00:00:00:00:01", dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, psrc="10.10.1.1", pdst="10.10.1.254", hwsrc="02:00:00:00:00:01"))
@@ -105,6 +111,31 @@ packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(sr
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::201", dst="2001:db8:beef::1", nh=44) / Raw(load=b"\x11\x00\x00\x00\x00\x00\x12\x34") / UDP(sport=5002, dport=5002) / Raw(load=b"frag_payload"))
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::202", dst="2001:db8:beef::1", nh=50) / Raw(load=b"\x00\x00\x10\x00\x00\x00\x00\x01\x11\x22\x33\x44\x55\x66\x77\x88"))
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") / IPv6(src="2001:db8:beef::203", dst="2001:db8:beef::1", nh=51) / Raw(load=b"\x3b\x01\x00\x00\x00\x00\x10\x00\x00\x00\x00\x01\x11\x22\x33\x44"))
+
+# 7e-2. Chained Extension Headers (Hop-by-Hop -> Routing -> Fragment)
+packets.append(
+    Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") /
+    IPv6(src="2001:db8:beef::204", dst="2001:db8:beef::1") /
+    IPv6ExtHdrHopByHop(options=[RouterAlert()]) /
+    IPv6ExtHdrRouting(addresses=["2001:db8:beef::10"]) /
+    IPv6ExtHdrFragment(id=0x98765432, offset=0, m=0) /
+    UDP(sport=7777, dport=7777) / Raw(b"chained_headers_payload")
+)
+
+# 7e-3. Multi-packet IPv6 Fragment Train (M=1 then M=0)
+frag6_id = 0xaabbccdd
+packets.append(
+    Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") /
+    IPv6(src="2001:db8:beef::205", dst="2001:db8:beef::1") /
+    IPv6ExtHdrFragment(id=frag6_id, offset=0, m=1, nh=17) /
+    UDP(sport=8889, dport=8889, len=108) / Raw(load=b"X"*80)
+)
+packets.append(
+    Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:fe") /
+    IPv6(src="2001:db8:beef::205", dst="2001:db8:beef::1") /
+    IPv6ExtHdrFragment(id=frag6_id, offset=11, m=0, nh=17) /
+    Raw(load=b"Y"*20)
+)
 
 # 7f. MLDv2 Multicast Listener Report (RFC 3810, ICMPv6 Type 143 to ff02::16)
 packets.append(Ether(src="02:00:00:00:00:01", dst="33:33:00:00:00:16") / IPv6(src="fe80::100", dst="ff02::16", hlim=1) / ICMPv6MLReport2(records=[ICMPv6MLDMultAddrRec(rtype=4, dst="ff02::1:ff00:1")]))

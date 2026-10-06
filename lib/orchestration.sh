@@ -72,6 +72,9 @@ restore_interface_state() {
     cmd_netns ethtool -A "${iface}" autoneg "${ORIG_PAUSE_AUTONEG[$iface]:-on}" rx "${ORIG_PAUSE_RX[$iface]:-on}" tx "${ORIG_PAUSE_TX[$iface]:-on}" 2>/dev/null || true
     cmd_netns ethtool --set-eee "${iface}" eee "${ORIG_EEE[$iface]:-on}" 2>/dev/null || true
     cmd_netns ethtool --set-priv-flags "${iface}" disable-fw-lldp off 2>/dev/null || true
+    if [[ -n "${ORIG_WOL[$iface]:-}" ]]; then
+        cmd_netns ethtool -s "${iface}" wol "${ORIG_WOL[$iface]}" 2>/dev/null || true
+    fi
 
     # Non-destructive IPv6 & IPv4 sysctl restoration
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.keep_addr_on_down=${ORIG_IPV6_KEEP_ADDR[$iface]:-0}" 2>/dev/null || true
@@ -86,13 +89,15 @@ restore_interface_state() {
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.enhanced_dad=${ORIG_IPV6_EDAD[$iface]:-1}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.ndisc_notify=${ORIG_IPV6_NDISC[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.accept_redirects=${ORIG_IPV6_REDIR[$iface]:-1}" 2>/dev/null || true
-    cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.mldv1_unsolicited_report_interval=${ORIG_MLDV1_INTVAL[$iface]:-1}" 2>/dev/null || true
-    cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.mldv2_unsolicited_report_interval=${ORIG_MLDV2_INTVAL[$iface]:-1}" 2>/dev/null || true
+    cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.mldv1_unsolicited_report_interval=${ORIG_MLDV1_INTVAL[$iface]:-10000}" 2>/dev/null || true
+    cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.mldv2_unsolicited_report_interval=${ORIG_MLDV2_INTVAL[$iface]:-1000}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.force_mld_version=${ORIG_MLD_VER[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.drop_unsolicited_na=${ORIG_DROP_UNA[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.accept_untracked_na=${ORIG_ACCEPT_UNA[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.forwarding=${ORIG_IPV6_FWD[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.mc_forwarding=${ORIG_IPV6_MC_FWD[$iface]:-0}" 2>/dev/null || true
+    cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.proxy_ndp=${ORIG_PROXY_NDP[$iface]:-0}" 2>/dev/null || true
+    cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.drop_unicast_in_l2_multicast=${ORIG_IPV6_DROP_UNICAST_L2M[$iface]:-0}" 2>/dev/null || true
 
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.arp_ignore=${ORIG_ARP_IGNORE[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.arp_announce=${ORIG_ARP_ANNOUNCE[$iface]:-0}" 2>/dev/null || true
@@ -106,8 +111,8 @@ restore_interface_state() {
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.accept_redirects=${ORIG_ACCEPT_REDIRECTS[$iface]:-1}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.secure_redirects=${ORIG_SECURE_REDIRECTS[$iface]:-1}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.drop_unicast_in_l2_multicast=${ORIG_DROP_UNICAST_L2M[$iface]:-0}" 2>/dev/null || true
-    cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.igmpv2_unsolicited_report_interval=${ORIG_IGMPV2_INTVAL[$iface]:-1}" 2>/dev/null || true
-    cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.igmpv3_unsolicited_report_interval=${ORIG_IGMPV3_INTVAL[$iface]:-1}" 2>/dev/null || true
+    cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.igmpv2_unsolicited_report_interval=${ORIG_IGMPV2_INTVAL[$iface]:-10000}" 2>/dev/null || true
+    cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.igmpv3_unsolicited_report_interval=${ORIG_IGMPV3_INTVAL[$iface]:-1000}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.force_igmp_version=${ORIG_IGMP_VER[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.forwarding=${ORIG_IPV4_FWD[$iface]:-0}" 2>/dev/null || true
     cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.mc_forwarding=${ORIG_IPV4_MC_FWD[$iface]:-0}" 2>/dev/null || true
@@ -118,16 +123,20 @@ restore_interface_state() {
         cmd_netns iptables -t raw -D PREROUTING -i "${iface}" -j NOTRACK 2>/dev/null || true
         cmd_netns iptables -t raw -D OUTPUT -o "${iface}" -j NOTRACK 2>/dev/null || true
         cmd_netns iptables -t raw -D OUTPUT -o "${iface}" -j DROP 2>/dev/null || true
+        cmd_netns iptables -t raw -D OUTPUT -o "${iface}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
     fi
     if command -v ip6tables >/dev/null 2>&1; then
         cmd_netns ip6tables -t raw -D PREROUTING -i "${iface}" -j NOTRACK 2>/dev/null || true
         cmd_netns ip6tables -t raw -D OUTPUT -o "${iface}" -j NOTRACK 2>/dev/null || true
         cmd_netns ip6tables -t raw -D OUTPUT -o "${iface}" -j DROP 2>/dev/null || true
+        cmd_netns ip6tables -t raw -D OUTPUT -o "${iface}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
     fi
 
-    # Restore NetworkManager management if we unmanaged it
+    # Zero-Egress Hardening: Keep interface explicitly UNMANAGED by NetworkManager and administratively DOWN
+    # to eliminate temporal packet emissions (DHCP, SLAAC, mDNS) onto the tapped segment.
     if [[ "${ORIG_NM_MANAGED[$iface]:-}" == "unmanaged" ]] && command -v nmcli >/dev/null 2>&1; then
-        cmd_netns nmcli device set "${iface}" managed yes 2>/dev/null || true
+        log_info "Interface '${iface}' remains unmanaged in NetworkManager to eliminate post-tap packet bursts."
+        log_info "To re-enable NetworkManager after physical cable disconnect: sudo nmcli device set ${iface} managed yes"
     fi
 
     if [[ "${HW_TYPE:-}" == "sfp" ]]; then
@@ -173,10 +182,20 @@ _disk_watchdog_worker() {
             eval "exec ${fd}>&-" 2>/dev/null || true
         fi
     done
+
+    # Allow initial grace period for atomic state serialization
+    local init_wait=0
+    while [[ ! -f "${stfile}" && $init_wait -lt 30 ]]; do
+        sleep 0.1
+        init_wait=$((init_wait + 1))
+    done
+    [[ ! -f "${stfile}" ]] && exit 0
+
     while [[ -f "${stfile}" ]]; do
         sleep 2 &
         sleep_pid=$!
         wait "${sleep_pid}" 2>/dev/null || true
+        [[ ! -f "${stfile}" ]] && break
 
         # Ring-buffer retention enforcement for compressed and uncompressed chunks:
         # Prevents unbound accumulation of rotated files when using -z gzip
@@ -199,15 +218,15 @@ _disk_watchdog_worker() {
 
         # Monitor tcpdump process liveness if PIDs are provided
         if [[ -n "${capture_pids}" ]]; then
-            local any_alive=0
+            local all_alive=1
             for tpid in ${capture_pids}; do
-                if kill -0 "${tpid}" 2>/dev/null && grep -q "tcpdump" "/proc/${tpid}/comm" 2>/dev/null; then
-                    any_alive=1
+                if ! kill -0 "${tpid}" 2>/dev/null || ! grep -q "tcpdump" "/proc/${tpid}/comm" 2>/dev/null; then
+                    all_alive=0
                     break
                 fi
             done
-            if [[ ${any_alive} -eq 0 ]]; then
-                if command -v logger >/dev/null 2>&1; then logger -t net-tap "CRITICAL: All capture processes for ${ifc} terminated unexpectedly. Triggering emergency teardown."; fi
+            if [[ ${all_alive} -eq 0 ]]; then
+                if command -v logger >/dev/null 2>&1; then logger -t net-tap "CRITICAL: A capture process for ${ifc} terminated unexpectedly. Triggering emergency teardown."; fi
                 local netns_cmd=()
                 if [[ -n "${ns}" ]]; then netns_cmd=(-n "${ns}"); fi
                 "${script}" off -i "${ifc}" "${netns_cmd[@]}" >/dev/null 2>&1 || true
@@ -257,10 +276,10 @@ start_tap() {
     
     local -A ORIG_PROMISC=() ORIG_ARP=() ORIG_MTU=() ORIG_TXQLEN=() ORIG_RX_RING=() ORIG_GRO=() ORIG_LRO=() ORIG_TSO=() ORIG_GSO=() ORIG_RX=() ORIG_RXVLAN=() ORIG_RX_VLAN_FILTER=() ORIG_RX_ALL=()
     local -A ORIG_IPV6_DISABLE=() ORIG_IPV6_KEEP_ADDR=() ORIG_IPV6_ADDR_GEN=() ORIG_IPV6_DAD=() ORIG_IPV6_DADT=() ORIG_IPV6_RA=() ORIG_IPV6_RS=() ORIG_IPV6_AUTOCONF=() ORIG_IPV6_TEMP=() ORIG_IPV6_EDAD=() ORIG_IPV6_NDISC=() ORIG_IPV6_REDIR=()
-    local -A ORIG_MLDV1_INTVAL=() ORIG_MLDV2_INTVAL=() ORIG_MLD_VER=() ORIG_DROP_UNA=() ORIG_ACCEPT_UNA=() ORIG_IPV6_FWD=() ORIG_IPV6_MC_FWD=()
+    local -A ORIG_MLDV1_INTVAL=() ORIG_MLDV2_INTVAL=() ORIG_MLD_VER=() ORIG_DROP_UNA=() ORIG_ACCEPT_UNA=() ORIG_IPV6_FWD=() ORIG_IPV6_MC_FWD=() ORIG_PROXY_NDP=() ORIG_IPV6_DROP_UNICAST_L2M=()
     local -A ORIG_ARP_IGNORE=() ORIG_ARP_ANNOUNCE=() ORIG_ARP_FILTER=() ORIG_ARP_NOTIFY=() ORIG_DROP_GARP=() ORIG_ARP_ACCEPT=() ORIG_PROXY_ARP=() ORIG_PROXY_ARP_PVLAN=() ORIG_SEND_REDIRECTS=() ORIG_ACCEPT_REDIRECTS=() ORIG_SECURE_REDIRECTS=() ORIG_DROP_UNICAST_L2M=()
     local -A ORIG_IGMPV2_INTVAL=() ORIG_IGMPV3_INTVAL=() ORIG_IGMP_VER=() ORIG_IPV4_FWD=() ORIG_IPV4_MC_FWD=() ORIG_IPV4_BC_FWD=() ORIG_OPERSTATE=()
-    local -A ORIG_PAUSE_AUTONEG=() ORIG_PAUSE_RX=() ORIG_PAUSE_TX=() ORIG_EEE=() ORIG_NM_MANAGED=()
+    local -A ORIG_PAUSE_AUTONEG=() ORIG_PAUSE_RX=() ORIG_PAUSE_TX=() ORIG_EEE=() ORIG_NM_MANAGED=() ORIG_WOL=()
 
     local PIDS_TCPDUMP=()
     local PIDS_DMESG=()
@@ -342,6 +361,7 @@ start_tap() {
     log_info "Configuring ${C_BOLD}${IFACE}${C_RESET} into full silent capture mode..."
 
     for iface in "${IFACES_ARR[@]}"; do
+        CONFIGURED_IFACES+=("${iface}")
         # 1. Capture current interface parameters
         if command -v nmcli >/dev/null 2>&1 && cmd_netns nmcli device status 2>/dev/null | grep -qw "${iface}"; then
             ORIG_NM_MANAGED[$iface]="unmanaged"
@@ -369,6 +389,7 @@ start_tap() {
         ORIG_PAUSE_RX[$iface]=$(cmd_netns ethtool -a "${iface}" 2>/dev/null | awk '/RX:/{print $2; exit}' || echo "on")
         ORIG_PAUSE_TX[$iface]=$(cmd_netns ethtool -a "${iface}" 2>/dev/null | awk '/TX:/{print $2; exit}' || echo "on")
         ORIG_EEE[$iface]=$(cmd_netns ethtool --show-eee "${iface}" 2>/dev/null | grep -qi "EEE status: enabled" && echo "on" || echo "off")
+        ORIG_WOL[$iface]=$(cmd_netns ethtool "${iface}" 2>/dev/null | awk '/Wake-on:/{print $2; exit}' || echo "d")
 
         ORIG_GRO[$iface]=$(cmd_netns ethtool -k "${iface}" 2>/dev/null | awk '/generic-receive-offload:/{print $2}' || echo "on")
         ORIG_LRO[$iface]=$(cmd_netns ethtool -k "${iface}" 2>/dev/null | awk '/large-receive-offload:/{print $2}' || echo "off")
@@ -398,6 +419,8 @@ start_tap() {
         ORIG_ACCEPT_UNA[$iface]=$(cmd_netns sysctl -n "net.ipv6.conf.${iface}.accept_untracked_na" 2>/dev/null || echo "0")
         ORIG_IPV6_FWD[$iface]=$(cmd_netns sysctl -n "net.ipv6.conf.${iface}.forwarding" 2>/dev/null || echo "0")
         ORIG_IPV6_MC_FWD[$iface]=$(cmd_netns sysctl -n "net.ipv6.conf.${iface}.mc_forwarding" 2>/dev/null || echo "0")
+        ORIG_PROXY_NDP[$iface]=$(cmd_netns sysctl -n "net.ipv6.conf.${iface}.proxy_ndp" 2>/dev/null || echo "0")
+        ORIG_IPV6_DROP_UNICAST_L2M[$iface]=$(cmd_netns sysctl -n "net.ipv6.conf.${iface}.drop_unicast_in_l2_multicast" 2>/dev/null || echo "0")
 
         ORIG_ARP_IGNORE[$iface]=$(cmd_netns sysctl -n "net.ipv4.conf.${iface}.arp_ignore" 2>/dev/null || echo "0")
         ORIG_ARP_ANNOUNCE[$iface]=$(cmd_netns sysctl -n "net.ipv4.conf.${iface}.arp_announce" 2>/dev/null || echo "0")
@@ -427,10 +450,11 @@ start_tap() {
         cmd_netns ip link set dev "${iface}" down 2>/dev/null || true
         cmd_netns ip link set dev "${iface}" txqueuelen 0 2>/dev/null || true
 
-        # Disable hardware flow control (PAUSE frames), EEE & firmware LLDP to prevent network pushback
+        # Disable hardware flow control (PAUSE frames), EEE, WoL & firmware LLDP to prevent network pushback
         cmd_netns ethtool -A "${iface}" autoneg off rx off tx off 2>/dev/null || true
         cmd_netns ethtool --set-eee "${iface}" eee off 2>/dev/null || true
         cmd_netns ethtool --set-priv-flags "${iface}" disable-fw-lldp on 2>/dev/null || true
+        cmd_netns ethtool -s "${iface}" wol d 2>/dev/null || true
 
         # Non-destructive stealth: Suppress spontaneous ICMPv6/MLD/ARP emissions without wiping IPv6 addresses
         if cmd_netns test -d "/proc/sys/net/ipv6/conf/${iface}"; then
@@ -451,6 +475,8 @@ start_tap() {
             cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.accept_untracked_na=0" 2>/dev/null || true
             cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.forwarding=0" 2>/dev/null || true
             cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.mc_forwarding=0" 2>/dev/null || true
+            cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.proxy_ndp=0" 2>/dev/null || true
+            cmd_netns sysctl -q -w "net.ipv6.conf.${iface}.drop_unicast_in_l2_multicast=1" 2>/dev/null || true
         fi
         cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.arp_ignore=8" 2>/dev/null || true
         cmd_netns sysctl -q -w "net.ipv4.conf.${iface}.arp_announce=2" 2>/dev/null || true
@@ -476,12 +502,20 @@ start_tap() {
         if command -v iptables >/dev/null 2>&1; then
             cmd_netns iptables -t raw -I PREROUTING -i "${iface}" -j NOTRACK 2>/dev/null || true
             cmd_netns iptables -t raw -I OUTPUT -o "${iface}" -j NOTRACK 2>/dev/null || true
-            cmd_netns iptables -t raw -I OUTPUT -o "${iface}" -j DROP 2>/dev/null || true
+            if [[ "${MODE:-passive}" == "active" ]]; then
+                cmd_netns iptables -t raw -I OUTPUT -o "${iface}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
+            else
+                cmd_netns iptables -t raw -I OUTPUT -o "${iface}" -j DROP 2>/dev/null || true
+            fi
         fi
         if command -v ip6tables >/dev/null 2>&1; then
             cmd_netns ip6tables -t raw -I PREROUTING -i "${iface}" -j NOTRACK 2>/dev/null || true
             cmd_netns ip6tables -t raw -I OUTPUT -o "${iface}" -j NOTRACK 2>/dev/null || true
-            cmd_netns ip6tables -t raw -I OUTPUT -o "${iface}" -j DROP 2>/dev/null || true
+            if [[ "${MODE:-passive}" == "active" ]]; then
+                cmd_netns ip6tables -t raw -I OUTPUT -o "${iface}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
+            else
+                cmd_netns ip6tables -t raw -I OUTPUT -o "${iface}" -j DROP 2>/dev/null || true
+            fi
         fi
 
         # 4. Attach egress drop filter across all protocols WHILE DOWN
@@ -554,7 +588,6 @@ start_tap() {
         # 6. Bring interface up into promiscuous mode now that egress drop and sysctls are active
         cmd_netns ip link set dev "${iface}" promisc on
         cmd_netns ip link set dev "${iface}" up
-        CONFIGURED_IFACES+=("${iface}")
 
         local PCAP_FILE="${OUT_DIR}/${TIMESTAMP}_${iface}_trace.pcap"
         local DMESG_LOG="${OUT_DIR}/${TIMESTAMP}_${iface}_dmesg.log"
@@ -659,11 +692,11 @@ start_tap() {
         declare -p IFACE MODE HW_TYPE TIMESTAMP NETNS ROTATE_SIZE ROTATE_COUNT OUT_DIR BPF_FILTER
         declare -p PIDS_TCPDUMP PIDS_DMESG PIDS_IPMON PCAP_FILES DMESG_LOGS LINK_LOGS TCPDUMP_ERRS CONFIGURED_IFACES
         declare -p ORIG_PROMISC ORIG_ARP ORIG_IPV6_DISABLE ORIG_IPV6_KEEP_ADDR ORIG_IPV6_ADDR_GEN ORIG_IPV6_DAD ORIG_IPV6_DADT ORIG_IPV6_RA ORIG_IPV6_RS ORIG_IPV6_AUTOCONF ORIG_IPV6_TEMP ORIG_IPV6_EDAD ORIG_IPV6_NDISC ORIG_IPV6_REDIR
-        declare -p ORIG_MLDV1_INTVAL ORIG_MLDV2_INTVAL ORIG_MLD_VER ORIG_DROP_UNA ORIG_ACCEPT_UNA ORIG_IPV6_FWD ORIG_IPV6_MC_FWD
+        declare -p ORIG_MLDV1_INTVAL ORIG_MLDV2_INTVAL ORIG_MLD_VER ORIG_DROP_UNA ORIG_ACCEPT_UNA ORIG_IPV6_FWD ORIG_IPV6_MC_FWD ORIG_PROXY_NDP ORIG_IPV6_DROP_UNICAST_L2M
         declare -p ORIG_MTU ORIG_TXQLEN ORIG_RX_RING ORIG_GRO ORIG_LRO ORIG_TSO ORIG_GSO ORIG_RX ORIG_RXVLAN ORIG_RX_VLAN_FILTER ORIG_RX_ALL
         declare -p ORIG_ARP_IGNORE ORIG_ARP_ANNOUNCE ORIG_ARP_FILTER ORIG_ARP_NOTIFY ORIG_DROP_GARP ORIG_ARP_ACCEPT ORIG_PROXY_ARP ORIG_PROXY_ARP_PVLAN ORIG_SEND_REDIRECTS ORIG_ACCEPT_REDIRECTS ORIG_SECURE_REDIRECTS ORIG_DROP_UNICAST_L2M
         declare -p ORIG_IGMPV2_INTVAL ORIG_IGMPV3_INTVAL ORIG_IGMP_VER ORIG_IPV4_FWD ORIG_IPV4_MC_FWD ORIG_IPV4_BC_FWD ORIG_OPERSTATE
-        declare -p ORIG_PAUSE_AUTONEG ORIG_PAUSE_RX ORIG_PAUSE_TX ORIG_EEE ORIG_NM_MANAGED
+        declare -p ORIG_PAUSE_AUTONEG ORIG_PAUSE_RX ORIG_PAUSE_TX ORIG_EEE ORIG_NM_MANAGED ORIG_WOL
         declare -p PID_WATCHDOG PID_AUTOSHUTDOWN
     } > "${tmp_state}"
     mv -f "${tmp_state}" "${STATE_FILE}"
@@ -738,10 +771,10 @@ stop_tap() {
     declare -g -A ORIG_PROMISC=() ORIG_ARP=() ORIG_MTU=() ORIG_TXQLEN=() ORIG_RX_RING=() ORIG_GRO=() ORIG_LRO=() ORIG_TSO=() ORIG_GSO=() ORIG_RX=() ORIG_RXVLAN=() ORIG_RX_VLAN_FILTER=() ORIG_RX_ALL=()
     declare -g -A ORIG_IPV6_RS=() ORIG_IPV6_DAD=() ORIG_IPV6_DADT=() ORIG_IPV6_ADDR_GEN=() ORIG_DROP_UNICAST_L2M=()
     declare -g -A ORIG_IPV6_DISABLE=() ORIG_IPV6_KEEP_ADDR=() ORIG_IPV6_RA=() ORIG_IPV6_AUTOCONF=() ORIG_IPV6_TEMP=() ORIG_IPV6_EDAD=() ORIG_IPV6_NDISC=() ORIG_IPV6_REDIR=()
-    declare -g -A ORIG_MLDV1_INTVAL=() ORIG_MLDV2_INTVAL=() ORIG_MLD_VER=() ORIG_DROP_UNA=() ORIG_ACCEPT_UNA=() ORIG_IPV6_FWD=() ORIG_IPV6_MC_FWD=()
+    declare -g -A ORIG_MLDV1_INTVAL=() ORIG_MLDV2_INTVAL=() ORIG_MLD_VER=() ORIG_DROP_UNA=() ORIG_ACCEPT_UNA=() ORIG_IPV6_FWD=() ORIG_IPV6_MC_FWD=() ORIG_PROXY_NDP=() ORIG_IPV6_DROP_UNICAST_L2M=()
     declare -g -A ORIG_ARP_IGNORE=() ORIG_ARP_ANNOUNCE=() ORIG_ARP_FILTER=() ORIG_ARP_NOTIFY=() ORIG_DROP_GARP=() ORIG_ARP_ACCEPT=() ORIG_PROXY_ARP=() ORIG_PROXY_ARP_PVLAN=() ORIG_SEND_REDIRECTS=() ORIG_ACCEPT_REDIRECTS=() ORIG_SECURE_REDIRECTS=()
     declare -g -A ORIG_IGMPV2_INTVAL=() ORIG_IGMPV3_INTVAL=() ORIG_IGMP_VER=() ORIG_IPV4_FWD=() ORIG_IPV4_MC_FWD=() ORIG_IPV4_BC_FWD=() ORIG_OPERSTATE=()
-    declare -g -A ORIG_PAUSE_AUTONEG=() ORIG_PAUSE_RX=() ORIG_PAUSE_TX=() ORIG_EEE=() ORIG_NM_MANAGED=()
+    declare -g -A ORIG_PAUSE_AUTONEG=() ORIG_PAUSE_RX=() ORIG_PAUSE_TX=() ORIG_EEE=() ORIG_NM_MANAGED=() ORIG_WOL=()
     declare -g -a PCAP_FILES=() PIDS_TCPDUMP=() PIDS_DMESG=() PIDS_IPMON=() CONFIGURED_IFACES=()
 
     IFS=',' read -ra IFACES_ARR <<< "${IFACE}"
@@ -1082,6 +1115,20 @@ clean_sessions() {
     local cleaned_sessions=0
     local cleaned_locks=0
 
+    mkdir -p "${STATE_DIR}"
+    local master_lock="${STATE_DIR}/.lock_master"
+    if [[ -L "${master_lock}" ]]; then
+        log_err "Security violation: Master lock '${master_lock}' is a symlink!"
+        exit 1
+    fi
+    local master_fd
+    exec {master_fd}>>"${master_lock}"
+    if ! flock -x -w 10 "${master_fd}"; then
+        _close_fd "${master_fd}"
+        log_err "Could not acquire master lock on ${master_lock} within 10s."
+        exit 1
+    fi
+
     if [[ -d "${STATE_DIR}" ]]; then
         for sfile in "${STATE_DIR}"/*.state; do
             [[ -f "${sfile}" ]] || continue
@@ -1125,7 +1172,7 @@ clean_sessions() {
             read -ra pids_to_kill <<< "${s_pids_str}"
             for p in "${pids_to_kill[@]}"; do
                 if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
-                    safe_kill "$p" "tcpdump|dmesg|ip|bash|net-tap|net-tap.sh"
+                    safe_kill "$p" "tcpdump|dmesg|ip|bash|net-tap|net-tap.sh" "tcpdump|dmesg|ip.*monitor|_disk_watchdog|_autoshutdown|net-tap"
                 fi
             done
 
@@ -1139,9 +1186,11 @@ clean_sessions() {
                     cmd_netns iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
                     cmd_netns iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
                     cmd_netns iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                    cmd_netns iptables -t raw -D OUTPUT -o "${dev}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
                     cmd_netns ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
                     cmd_netns ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
                     cmd_netns ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                    cmd_netns ip6tables -t raw -D OUTPUT -o "${dev}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
                 done
             else
                 IFS=',' read -ra if_arr <<< "${s_iface}"
@@ -1151,18 +1200,22 @@ clean_sessions() {
                         ip netns exec "${s_netns}" iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
                         ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
                         ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        ip netns exec "${s_netns}" iptables -t raw -D OUTPUT -o "${dev}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
                         ip netns exec "${s_netns}" ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
                         ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
                         ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        ip netns exec "${s_netns}" ip6tables -t raw -D OUTPUT -o "${dev}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
                         ip netns exec "${s_netns}" ip link set "${dev}" down 2>/dev/null || true
                     else
                         tc qdisc del dev "${dev}" clsact 2>/dev/null || true
                         iptables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
                         iptables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
                         iptables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        iptables -t raw -D OUTPUT -o "${dev}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
                         ip6tables -t raw -D PREROUTING -i "${dev}" -j NOTRACK 2>/dev/null || true
                         ip6tables -t raw -D OUTPUT -o "${dev}" -j NOTRACK 2>/dev/null || true
                         ip6tables -t raw -D OUTPUT -o "${dev}" -j DROP 2>/dev/null || true
+                        ip6tables -t raw -D OUTPUT -o "${dev}" -m mark ! --mark 0x7a9 -j DROP 2>/dev/null || true
                         ip link set "${dev}" down 2>/dev/null || true
                     fi
                 done
@@ -1172,39 +1225,38 @@ clean_sessions() {
             cleaned_sessions=$((cleaned_sessions + 1))
         done
 
-        {
-            exec 8>"${STATE_DIR}/.lock_master"
-            flock -x 8 2>/dev/null || true
-
-            if [[ -z "${IFACE:-}" ]]; then
-                for lk in "${STATE_DIR}"/.lock_* "${STATE_DIR}"/*.lock; do
-                    [[ -f "${lk}" ]] || continue
-                    [[ "$(basename "${lk}")" == ".lock_master" ]] && continue
-                    if (
-                        exec 9>"${lk}"
-                        flock -x -n 9
-                    ) 2>/dev/null; then
-                        cleaned_locks=$((cleaned_locks + 1))
-                    fi
-                done
-            else
-                local safe_i="${IFACE//\//_}"
-                local safe_n="${NETNS//\//_}"
-                local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
-                [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
-                for lk in "${lk_pattern}"*; do
-                    [[ -f "${lk}" ]] || continue
-                    if (
-                        exec 9>"${lk}"
-                        flock -x -n 9 && rm -f "${lk}"
-                    ) 2>/dev/null; then
-                        cleaned_locks=$((cleaned_locks + 1))
-                    fi
-                done
-            fi
-            exec 8>&-
-        } 2>/dev/null || true
+        if [[ -z "${IFACE:-}" ]]; then
+            for lk in "${STATE_DIR}"/.lock_* "${STATE_DIR}"/*.lock; do
+                [[ -f "${lk}" ]] || continue
+                [[ "$(basename "${lk}")" == ".lock_master" ]] && continue
+                [[ -L "${lk}" ]] && continue
+                if (
+                    exec 9>>"${lk}"
+                    flock -x -n 9 && rm -f "${lk}"
+                ) 2>/dev/null; then
+                    cleaned_locks=$((cleaned_locks + 1))
+                fi
+            done
+        else
+            local safe_i="${IFACE//\//_}"
+            local safe_n="${NETNS//\//_}"
+            local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
+            [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
+            for lk in "${lk_pattern}"*; do
+                [[ -f "${lk}" ]] || continue
+                [[ -L "${lk}" ]] && continue
+                if (
+                    exec 9>>"${lk}"
+                    flock -x -n 9 && rm -f "${lk}"
+                ) 2>/dev/null; then
+                    cleaned_locks=$((cleaned_locks + 1))
+                fi
+            done
+        fi
     fi
+
+    flock -u "${master_fd}" 2>/dev/null || true
+    _close_fd "${master_fd}"
 
     log_ok "Cleanup complete: ${cleaned_sessions} session(s) detached, ${cleaned_locks} lock file(s) purged."
 }

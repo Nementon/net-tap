@@ -59,7 +59,7 @@ test-integration: lint fixtures
 	@$(SUDO) PYTHONDONTWRITEBYTECODE=1 bash tests/run_tests.sh
 
 clean:
-	@rm -rf tests/__pycache__ /tmp/pmtud.pcap
+	@rm -rf lib/__pycache__ tests/__pycache__ /tmp/pmtud.pcap
 	@find /tmp -maxdepth 1 -user "$$(id -u)" -name "net-tap-*" -exec rm -rf {} + 2>/dev/null || true
 
 .PHONY: all install installcheck uninstall lint fixtures test test-integration clean

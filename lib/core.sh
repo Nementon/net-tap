@@ -82,7 +82,9 @@ verify_dependencies() {
 verify_disk_space() {
     local target_dir="$1"
     local count="${2:-1}"
-    local req_mb=$((ROTATE_SIZE * ROTATE_COUNT * count))
+    local rot_size="${ROTATE_SIZE:-${DEFAULT_ROTATE_SIZE:-100}}"
+    local rot_count="${ROTATE_COUNT:-${DEFAULT_ROTATE_COUNT:-10}}"
+    local req_mb=$((rot_size * rot_count * count))
     local avail_mb
     
     if ! mkdir -p "${target_dir}" 2>/dev/null; then
@@ -139,7 +141,7 @@ load_state_file() {
     local sdir_owner sdir_perm
     sdir_owner=$(stat -c "%u" "${real_sdir}" 2>/dev/null || echo "-1")
     sdir_perm=$(stat -c "%a" "${real_sdir}" 2>/dev/null || echo "777")
-    if [[ "${sdir_owner}" -ne 0 && "${sdir_owner}" -ne "${EUID}" ]]; then
+    if [[ "${sdir_owner}" -ne 0 && "${sdir_owner}" -ne "${EUID}" && "${sdir_owner}" -ne "${SUDO_UID:-0}" ]]; then
         log_err "Security violation: STATE_DIR '${real_sdir}' is not owned by root (UID 0) or current user."
         return 1
     fi
@@ -149,9 +151,16 @@ load_state_file() {
     fi
     local file_owner perm
     file_owner=$(stat -c "%u" "${sfile}" 2>/dev/null || echo "-1")
-    if [[ "${EUID}" -ne 0 && "${file_owner}" -ne "${EUID}" ]]; then
-        log_err "Security violation: State file '${sfile}' is not owned by root (UID 0) or current user."
-        return 1
+    if [[ "${EUID}" -eq 0 ]]; then
+        if [[ "${file_owner}" -ne 0 && "${file_owner}" -ne "${SUDO_UID:-0}" ]]; then
+            log_err "Security violation: State file '${sfile}' must be owned by root (UID 0) or invoking user (${SUDO_UID:-0})."
+            return 1
+        fi
+    else
+        if [[ "${file_owner}" -ne 0 && "${file_owner}" -ne "${EUID}" ]]; then
+            log_err "Security violation: State file '${sfile}' is not owned by root (UID 0) or current user (${EUID})."
+            return 1
+        fi
     fi
     perm=$(stat -c "%a" "${sfile}" 2>/dev/null || echo "777")
     if [[ "${perm}" != "600" && "${perm}" != "640" && "${perm}" != "644" && "${perm}" != "400" && "${perm}" != "440" && "${perm}" != "444" ]]; then
@@ -275,8 +284,12 @@ acquire_lock() {
 
     # Acquire master lock to serialize lock acquisitions
     local master_lock="${STATE_DIR}/.lock_master"
+    if [[ -L "${master_lock}" ]]; then
+        log_err "Security violation: Master lock '${master_lock}' is a symlink!"
+        exit 1
+    fi
     local master_fd
-    exec {master_fd}>"${master_lock}"
+    exec {master_fd}>>"${master_lock}"
     if ! flock -x -w 10 "${master_fd}"; then
         _close_fd "${master_fd}"
         log_err "Could not acquire master lock on ${master_lock} within 10s."
@@ -298,8 +311,14 @@ acquire_lock() {
 
     if [[ ${#if_list[@]} -eq 0 ]]; then
         local global_lockfile="${STATE_DIR}/.lock_${lock_prefix}global"
+        if [[ -L "${global_lockfile}" ]]; then
+            log_err "Security violation: Lock file '${global_lockfile}' is a symlink!"
+            flock -u "${master_fd}" 2>/dev/null || true
+            _close_fd "${master_fd}"
+            exit 1
+        fi
         local g_fd
-        exec {g_fd}>"${global_lockfile}"
+        exec {g_fd}>>"${global_lockfile}"
         if ! flock -x -w 10 "${g_fd}"; then
             _close_fd "${g_fd}"
             flock -u "${master_fd}" 2>/dev/null || true
@@ -312,8 +331,15 @@ acquire_lock() {
     else
         for dev in "${if_list[@]}"; do
             local dev_lockfile="${STATE_DIR}/.lock_${lock_prefix}${dev}"
+            if [[ -L "${dev_lockfile}" ]]; then
+                log_err "Security violation: Lock file '${dev_lockfile}' is a symlink!"
+                flock -u "${master_fd}" 2>/dev/null || true
+                _close_fd "${master_fd}"
+                release_lock
+                exit 1
+            fi
             local d_fd
-            exec {d_fd}>"${dev_lockfile}"
+            exec {d_fd}>>"${dev_lockfile}"
             if ! flock -x -n "${d_fd}"; then
                 _close_fd "${d_fd}"
                 flock -u "${master_fd}" 2>/dev/null || true
@@ -369,17 +395,17 @@ Options:
   -D, --duration <sec>      Auto-shutdown timer in seconds (e.g., 3600 for 1 hour).
   -z, --gzip                Enable gzip compression for rotated PCAP chunks.
   -w, --watchdog-threshold <pct> Disk watchdog shutdown threshold % (default: 85).
-  -j, --json                Output analyze results as JSON (suppresses human-readable text).
+  -j, --json                Output analyze or list results as JSON (suppresses human-readable text).
   -h, --help                Show this help message.
 
 Probe Options (for 'probe' command):
   --arp-scan <cidr>         Scan IPv4 subnet via ARP requests (e.g., 192.168.1.0/24).
   --ndp-scan <cidr>         Scan IPv6 subnet via ICMPv6 Neighbor/Router Solicitations.
   --dhcp-discover           Broadcast RFC 2131 DHCP Discover (IPv4).
-  --dhcp-discover6          Transmit RFC 8415 DHCPv6 Solicit (IPv6).
+  --dhcp-discover6          Transmit RFC 8415 DHCPv6 Solicit (IPv6, alias: --dhcp6-discover).
   --icmp-pmtu <target>      Measure Path MTU using stepped DF-bit ICMP Echo requests.
   --tcp-syn <target>        Probe TCP port availability using single SYN packets.
-  --eapol-check             Audit 802.1X Network Access Control via EAPOL-Start frame.
+  --eapol-check             Audit 802.1X Network Access Control via EAPOL-Start frame (alias: --eapol-probe).
   --snmp-probe <target>     Probe SNMPv2c sysDescr.0 via single UDP 161 frame.
   --dns-probe <target>      Probe DNS server version via CHAOS TXT version.bind query.
   --nbns-probe <target>     Probe NetBIOS Name Service Node Status on UDP 137.
@@ -391,6 +417,9 @@ Probe Options (for 'probe' command):
   --vlan <vid>              Inject probes with IEEE 802.1Q VLAN tag(s) (e.g. 100, 10-20, or 10,20,100-105).
   --qinq <s-tag,c-tag>      Inject probes with double-tagged QinQ headers (e.g., 100,200).
   --auto-vlans              Automatically probe across all VLANs passively observed on link.
+  --pcp <0-7>               IEEE 802.1p Priority Code Point (default: 0).
+  --dei <0|1>               IEEE 802.1Q Drop Eligible Indicator bit (default: 0).
+  --qinq-tpid <hex>         Outer VLAN TPID / EtherType (e.g. 0x88a8, 0x8100; default: 0x88a8).
   --rate <pps>              Maximum probe transmission rate in packets/sec (default: 50).
   --timeout <sec>           Probe execution timeout in seconds (default: 5).
   --audit-id <id>           Custom audit identifier for probe correlation (default: auto).

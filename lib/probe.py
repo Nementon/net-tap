@@ -32,19 +32,12 @@ import time
 from typing import Optional, List, Tuple, Dict, Any, Sequence
 
 try:
-    try:
-        from scapy.layers.l2 import Ether, Dot1Q, ARP
-        from scapy.layers.inet import IP, ICMP, UDP, TCP
-        from scapy.layers.inet6 import IPv6, ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, ICMPv6ND_NA
-        from scapy.layers.dhcp import BOOTP, DHCP
-        from scapy.layers.dns import DNS, DNSQR
-        from scapy.packet import Raw, bind_layers
-    except ImportError:
-        from scapy.all import (  # type: ignore[attr-defined]
-            Ether, Dot1Q, ARP, IP, IPv6, ICMP, UDP, BOOTP, DHCP, TCP,
-            ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, ICMPv6ND_NA, Raw,
-            DNS, DNSQR, bind_layers
-        )
+    from scapy.layers.l2 import Ether, Dot1Q, ARP
+    from scapy.layers.inet import IP, ICMP, UDP, TCP
+    from scapy.layers.inet6 import IPv6, ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6NDOptSrcLLAddr, ICMPv6EchoRequest, ICMPv6ND_NA
+    from scapy.layers.dhcp import BOOTP, DHCP
+    from scapy.layers.dns import DNS, DNSQR
+    from scapy.packet import Packet, Raw, bind_layers
     import scapy.layers.snmp as snmp
     bind_layers(Ether, Dot1Q, type=0x9100)
     bind_layers(Ether, Dot1Q, type=0x9200)
@@ -444,10 +437,10 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
         return "ff:ff:ff:ff:ff:ff" if (not is_v6 or fallback_mode == "broadcast") else "33:33:00:00:00:01"
 
 
-def wrap_l2(payload: Any, dst_mac: str, src_mac: str,
+def wrap_l2(payload: Packet, dst_mac: str, src_mac: str,
             vlan: Optional[int] = None, qinq: Optional[Tuple[int, int]] = None,
             eth_type: Optional[int] = None, pcp: int = 0, dei: int = 0,
-            qinq_tpid: int = 0x88a8) -> Any:
+            qinq_tpid: int = 0x88a8) -> Packet:
     """Encapsulate payload in Ethernet, optional 802.1Q, or 802.1ad QinQ."""
     if qinq and len(qinq) == 2:
         s_vid, c_vid = qinq
@@ -775,8 +768,8 @@ def main() -> None:
                         "end"
                     ]
                 )
-                ip_udp = IP(src="0.0.0.0", dst="255.255.255.255", id=PROBE_FWMARK) / UDP(sport=68, dport=67) / bootp_payload
-                pkt = wrap_l2(ip_udp, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                dhcp_l3_pkt = IP(src="0.0.0.0", dst="255.255.255.255", id=PROBE_FWMARK) / UDP(sport=68, dport=67) / bootp_payload
+                pkt = wrap_l2(dhcp_l3_pkt, dst_mac="ff:ff:ff:ff:ff:ff", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -800,8 +793,8 @@ def main() -> None:
                 dhcp6_payload += struct.pack("!HHIII", 25, 12, 1, 0, 0)  # Opt 25: IA_PD (Prefix Delegation)
                 dhcp6_payload += struct.pack("!HH", 14, 0)               # Opt 14: Rapid Commit
                 dhcp6_src = (args.src_ip6 if args.src_ip6 else src_ll).split("%")[0]
-                ip_udp = IPv6(src=dhcp6_src, dst="ff02::1:2", fl=PROBE_FWMARK) / UDP(sport=546, dport=547) / Raw(load=dhcp6_payload)
-                pkt = wrap_l2(ip_udp, dst_mac="33:33:00:01:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                dhcp6_l3_pkt = IPv6(src=dhcp6_src, dst="ff02::1:2", fl=PROBE_FWMARK) / UDP(sport=546, dport=547) / Raw(load=dhcp6_payload)
+                pkt = wrap_l2(dhcp6_l3_pkt, dst_mac="33:33:00:01:00:02", src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -840,6 +833,7 @@ def main() -> None:
                     if time.monotonic() > deadline:
                         break
                     seq += 1
+                    echo_pkt: Packet
                     if is_v6:
                         # RFC 8200 IPv6 header is 40 bytes; ICMPv6 Echo is 8 bytes
                         payload_len = max(0, sz - 40 - 8)
@@ -906,6 +900,7 @@ def main() -> None:
                         ("Timestamp", (int(time.time()), 0))
                     ]
                     tcp_layer = TCP(sport=sport, dport=port, flags="S", seq=isn, options=tcp_options)
+                    syn_pkt: Packet
                     if is_v6:
                         syn_pkt = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / tcp_layer
                     else:
@@ -959,11 +954,12 @@ def main() -> None:
                 community = args.community or "public"
                 vb = snmp.SNMPvarbind(oid="1.3.6.1.2.1.1.1.0")
                 snmp_pdu = snmp.SNMP(version=1, community=community, PDU=snmp.SNMPget(id=PROBE_FWMARK, varbindlist=[vb]))
+                snmp_l3_pkt: Packet
                 if is_v6:
-                    ip_udp = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / UDP(sport=sport, dport=161) / snmp_pdu
+                    snmp_l3_pkt = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / UDP(sport=sport, dport=161) / snmp_pdu
                 else:
-                    ip_udp = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / UDP(sport=sport, dport=161) / snmp_pdu
-                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    snmp_l3_pkt = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / UDP(sport=sport, dport=161) / snmp_pdu
+                pkt = wrap_l2(snmp_l3_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:
@@ -993,11 +989,12 @@ def main() -> None:
                 seq += 1
                 sport = cryptorand.randint(30000, 60000)
                 dns_payload = DNS(id=PROBE_FWMARK, rd=1, qd=DNSQR(qname="version.bind", qtype="TXT", qclass=3))
+                dns_l3_pkt: Packet
                 if is_v6:
-                    ip_udp = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / UDP(sport=sport, dport=53) / dns_payload
+                    dns_l3_pkt = IPv6(src=src_ip6, dst=target_ip, fl=PROBE_FWMARK) / UDP(sport=sport, dport=53) / dns_payload
                 else:
-                    ip_udp = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / UDP(sport=sport, dport=53) / dns_payload
-                pkt = wrap_l2(ip_udp, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dns_l3_pkt = IP(src=src_ip, dst=target_ip, id=PROBE_FWMARK) / UDP(sport=sport, dport=53) / dns_payload
+                pkt = wrap_l2(dns_l3_pkt, dst_mac=dst_mac, src_mac=src_mac, vlan=vid, qinq=qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
                 try:
                     sock.send(bytes(pkt))
                 except OSError as err:

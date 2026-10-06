@@ -38,7 +38,7 @@ else
     done
 fi
 
-# shellcheck disable=SC2317 # Asynchronous trap cleanup handler invoked on EXIT/INT/TERM signals
+# shellcheck disable=SC2317,SC2329 # Asynchronous trap cleanup handler invoked on EXIT/INT/TERM signals
 cleanup() {
     local exit_code=$?
     if [[ -n "${TEST_STATE_DIR:-}" ]]; then rm -rf "${TEST_STATE_DIR}" 2>/dev/null || true; fi

@@ -352,6 +352,67 @@ class TestProbeUnit(unittest.TestCase):
             if os.path.exists(audit_path):
                 os.unlink(audit_path)
 
+    @patch("probe.create_probe_socket")
+    def test_main_pmtu_ipv4_and_ipv6_probes(self, mock_create_sock):
+        """Test IPv4 PMTU (DF bit set, ID 1961) and IPv6 PMTU (Flow Label 1961, stepped sizes)."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured_packets = []
+        mock_sock.send.side_effect = lambda b: captured_packets.append(Ether(b))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        # 1. IPv4 PMTU
+        test_args_v4 = [
+            "probe.py", "-i", "dummy0", "-t", "pmtu", "--target", "192.168.1.1",
+            "--rate", "500", "--timeout", "2",
+            "--audit-file", audit_path, "--audit-id", "test_pmtu_v4"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_v4):
+                probe.main()
+            self.assertEqual(len(captured_packets), 9)  # 9 stepped sizes
+            for pkt in captured_packets:
+                self.assertTrue(pkt.haslayer(IP))
+                self.assertTrue(pkt.haslayer(ICMP))
+                self.assertEqual(pkt[IP].id, probe.PROBE_FWMARK)  # Watermark 1961
+                self.assertEqual(pkt[IP].flags, "DF")  # DF bit set for PMTUD (RFC 1191)
+                self.assertEqual(pkt[ICMP].id, probe.PROBE_FWMARK)  # Watermark 1961
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+        captured_packets.clear()
+        # 2. IPv6 PMTU
+        test_args_v6 = [
+            "probe.py", "-i", "dummy0", "-t", "pmtu", "--target", "2001:db8::1",
+            "--rate", "500", "--timeout", "2",
+            "--audit-file", audit_path, "--audit-id", "test_pmtu_v6"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_v6):
+                probe.main()
+            self.assertEqual(len(captured_packets), 8)  # 8 stepped sizes (1280+)
+            for pkt in captured_packets:
+                self.assertTrue(pkt.haslayer(IPv6))
+                self.assertTrue(pkt.haslayer(probe.ICMPv6EchoRequest))
+                self.assertEqual(pkt[IPv6].fl, probe.PROBE_FWMARK)  # Flow label watermark 1961
+                self.assertEqual(pkt[probe.ICMPv6EchoRequest].id, probe.PROBE_FWMARK)  # Watermark 1961
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    def test_source_ip_resolution(self):
+        """Test IPv4 and IPv6 source resolution with explicit overrides and on-subnet derivations."""
+        # IPv4 Explicit override
+        self.assertEqual(probe.resolve_source_ip("dummy0", "192.168.1.1", explicit_src="10.0.0.1"), "10.0.0.1")
+        # IPv4 On-subnet derivation for gateway target
+        derived = probe.resolve_source_ip("dummy0", "192.168.50.1")
+        self.assertEqual(derived, "192.168.50.253")
+        # IPv6 Explicit override
+        self.assertEqual(probe.resolve_source_ipv6("dummy0", "2001:db8::1", explicit_src="2001:db8::99"), "2001:db8::99")
+
 
 if __name__ == "__main__":
     unittest.main()

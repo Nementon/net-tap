@@ -161,23 +161,39 @@ analyze_session() {
 
     # Perform consolidated streaming dissection pass with per-packet boundary tracking
     local qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count ospf_count
-    local ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah
+    local ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah ipv6_dstopt
     local tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans
     local tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order
     local lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag
+    local arp_probe_count arp_garp_count jumbo_count max_frame_len
     read -r qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count ospf_count \
-            ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah \
+            ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah ipv6_dstopt \
             tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans \
             tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order \
-            lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag < <(
+            lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag \
+            arp_probe_count arp_garp_count jumbo_count max_frame_len < <(
         awk '
             /^[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
                 in_qinq=0; in_arp=0; in_ndp=0; in_vxlan=0; in_gtp_u=0; in_gtp_c=0; in_geneve=0; in_gre=0; in_6in4=0; in_4in6=0; in_srv6=0; in_sctp=0; in_mpls=0; in_isis=0; in_bfd=0; in_pmtud=0; in_ospf=0
                 in_lldp=0; in_cdp=0; in_stp=0; in_lacp=0; in_vrrp=0; in_hsrp=0; in_eapol=0; in_dhcp=0
-                in_hbh=0; in_rtg=0; in_frag=0; in_esp=0; in_ah=0; in_v4frag=0
+                in_hbh=0; in_rtg=0; in_frag=0; in_esp=0; in_ah=0; in_v4frag=0; in_dstopt=0
+                for (i = 1; i <= NF; i++) {
+                    if ($i == "length") {
+                        flen = $(i+1) + 0
+                        if (flen > max_flen) max_flen = flen
+                        if (flen > 1518) jumbo++
+                        break
+                    }
+                }
             }
             /ethertype 802.1Q.*ethertype 802.1Q|0x88a8|0x9100|0x9200|QinQ/ { if (!in_qinq) { qinq++; in_qinq=1 } }
-            /ethertype ARP|Request who-has|Reply .* is-at|ARP,/ { if (!in_arp) { arp++; in_arp=1 } }
+            /ethertype ARP|Request who-has|Reply .* is-at|ARP,/ {
+                if (!in_arp) {
+                    arp++; in_arp=1
+                    if (/tell 0\.0\.0\.0/) arp_probe++
+                    else if (/who-has ([0-9.]+) tell \1/ || (/Reply/ && (/ff:ff:ff:ff:ff:ff/ || /00:00:00:00:00:00/))) arp_garp++
+                }
+            }
             /neighbor solicitation/ { ndp_ns++; if (!in_ndp) { ndp++; in_ndp=1 } }
             /neighbor advertisement/ { ndp_na++; if (!in_ndp) { ndp++; in_ndp=1 } }
             /router advertisement/ { ndp_ra++; if (!in_ndp) { ndp++; in_ndp=1 } }
@@ -203,6 +219,7 @@ analyze_session() {
             /flags \[\+\]|offset [1-9]/ { if (!in_v4frag) { v4frag++; in_v4frag=1 } }
             /next-header (ESP) \(50\)|: ESP\(/ { if (!in_esp) { ipv6_esp++; in_esp=1 } }
             /next-header (AH) \(51\)|: AH\(/ { if (!in_ah) { ipv6_ah++; in_ah=1 } }
+            /next-header (Destination|Options) \(60\)|: dstopt/ { if (!in_dstopt) { ipv6_dstopt++; in_dstopt=1 } }
             /Flags \[S\]/ { tcp_syn++ }
             /Flags \[S\.\]/ { tcp_synack++ }
             /Flags \[R/ { tcp_rst++ }
@@ -225,10 +242,11 @@ analyze_session() {
             /BOOTP\/DHCP|DHCPv6|dhcp6|\.546 >|\.547 >/ { if (!in_dhcp) { dhcp++; in_dhcp=1 } }
             END {
                 print qinq+0, arp+0, ndp+0, ndp_ns+0, ndp_na+0, ndp_rs+0, ndp_ra+0, ndp_redirect+0, vxlan+0, gtp_u+0, gtp_c+0, geneve+0, gre+0, six_in_four+0, four_in_six+0, srv6+0, sctp+0, mpls+0, isis+0, bfd+0, pmtud+0, ospf+0, \
-                      ipv6_hbh+0, ipv6_routing+0, ipv6_frag+0, ipv6_esp+0, ipv6_ah+0, \
+                      ipv6_hbh+0, ipv6_routing+0, ipv6_frag+0, ipv6_esp+0, ipv6_ah+0, ipv6_dstopt+0, \
                       tcp_syn+0, tcp_synack+0, tcp_rst+0, tcp_fin+0, tcp_psh+0, tcp_urg+0, tcp_zero_win+0, tcp_retrans+0, \
                       tcp_mss+0, tcp_wscale+0, tcp_sack_perm+0, tcp_out_of_order+0, \
-                      lldp+0, cdp+0, stp+0, lacp+0, vrrp+0, hsrp+0, eapol+0, dhcp+0, v4frag+0
+                      lldp+0, cdp+0, stp+0, lacp+0, vrrp+0, hsrp+0, eapol+0, dhcp+0, v4frag+0, \
+                      arp_probe+0, arp_garp+0, jumbo+0, max_flen+0
             }
         ' "${dump_file}"
     )
@@ -239,6 +257,10 @@ analyze_session() {
     
     if [[ "${qinq_count}" -gt 0 ]]; then
         echo -e "  ${C_CYAN}[FOUND] QinQ Double-Tagging (802.1ad):${C_RESET} ${qinq_count} nested VLAN frame(s) observed."
+    fi
+
+    if [[ "${jumbo_count}" -gt 0 ]]; then
+        echo -e "  ${C_CYAN}[FOUND] Carrier Jumbo Frames (>1518B):${C_RESET} ${jumbo_count} frame(s) observed (Max frame length: ${max_frame_len} bytes)."
     fi
 
     if [[ -n "${vlan_ids}" ]]; then
@@ -522,22 +544,66 @@ analyze_session() {
         echo "  [ -- ] IPv6 RAs: Not observed."
     fi
 
+    local ipv6_rdnss
+    ipv6_rdnss=$(grep -i "rdnss option" "${dump_file}" 2>/dev/null | sed -nE 's/.*addr:[[:space:]]*([0-9a-fA-F:]+).*/\1/p' | sort -u || true)
+    if [[ -n "${ipv6_rdnss}" ]]; then
+        echo -e "  ${C_GREEN}[FOUND] Advertised IPv6 Recursive DNS Servers (RDNSS):${C_RESET}"
+        while IFS= read -r srv; do
+            [[ -z "${srv}" ]] && continue
+            echo -e "    -> DNS Server: ${C_BOLD}${srv}${C_RESET}"
+        done <<< "${ipv6_rdnss}"
+    fi
+
+    local ipv6_dnssl
+    ipv6_dnssl=$(grep -i "dnssl option" "${dump_file}" 2>/dev/null | sed -nE 's/.*domain\(s\):[[:space:]]*([^,]+).*/\1/p' | sort -u || true)
+    if [[ -n "${ipv6_dnssl}" ]]; then
+        echo -e "  ${C_GREEN}[FOUND] Advertised IPv6 DNS Search List (DNSSL):${C_RESET}"
+        while IFS= read -r dom; do
+            [[ -z "${dom}" ]] && continue
+            echo -e "    -> Search Domain: ${C_BOLD}${dom}${C_RESET}"
+        done <<< "${ipv6_dnssl}"
+    fi
+
+    local observed_mcast
+    observed_mcast=$(grep -oE '\bff0[0-9a-fA-F]:[0-9a-fA-F:]*\b' "${dump_file}" 2>/dev/null | sort -u || true)
+    if [[ -n "${observed_mcast}" ]]; then
+        echo -e "\n${C_CYAN}Active IPv6 Multicast Groups Observed:${C_RESET}"
+        while IFS= read -r mcast_grp; do
+            [[ -z "${mcast_grp}" ]] && continue
+            local desc=""
+            case "${mcast_grp,,}" in
+                ff02::1) desc=" (All-Nodes Multicast - RFC 4291)" ;;
+                ff02::2) desc=" (All-Routers Multicast - RFC 4291)" ;;
+                ff02::1:2) desc=" (DHCPv6 Relay/Servers - RFC 8415)" ;;
+                ff02::5) desc=" (OSPFv3 All Routers - RFC 5340)" ;;
+                ff02::6) desc=" (OSPFv3 Designated Routers - RFC 5340)" ;;
+                ff02::16) desc=" (MLDv2 Multicast Listener Reports - RFC 3810)" ;;
+                ff02::1:ff*) desc=" (Solicited-Node Multicast - RFC 4291)" ;;
+            esac
+            echo -e "  -> ${C_BOLD}${mcast_grp}${C_RESET}${desc}"
+        done <<< "${observed_mcast}"
+    fi
+
     # IPv6 Extension Headers & IP Fragmentation
     echo -e "\n${C_CYAN}IPv6 Extension Headers & IP Fragmentation:${C_RESET}"
     if [[ "${ipv4_frag}" -gt 0 ]]; then
         echo -e "  IPv4 Fragmentation  : ${ipv4_frag} fragmented packet(s) observed."
     fi
-    local v6_ext_total=$((ipv6_hbh + ipv6_routing + ipv6_frag + ipv6_esp + ipv6_ah))
+    local v6_ext_total=$((ipv6_hbh + ipv6_routing + ipv6_frag + ipv6_esp + ipv6_ah + ipv6_dstopt))
     if [[ ${v6_ext_total} -gt 0 ]]; then
         echo -e "  Hop-by-Hop (0) : ${ipv6_hbh} | Routing (43) : ${ipv6_routing} | Fragment (44) : ${ipv6_frag}"
-        echo -e "  IPsec ESP (50) : ${ipv6_esp} | IPsec AH (51) : ${ipv6_ah}"
+        echo -e "  Destination (60) : ${ipv6_dstopt:-0} | IPsec ESP (50) : ${ipv6_esp} | IPsec AH (51) : ${ipv6_ah}"
     else
         echo -e "  [ -- ] No IPv6 extension headers observed."
     fi
 
     # Address Resolution (ARP & NDP)
     echo -e "\n${C_CYAN}Address Resolution Protocol Activity:${C_RESET}"
-    echo -e "  IPv4 ARP Resolution Frames  : ${arp_count}"
+    local arp_detail=""
+    if [[ ${arp_probe_count:-0} -gt 0 || ${arp_garp_count:-0} -gt 0 ]]; then
+        arp_detail=" (Standard: $((arp_count - arp_probe_count - arp_garp_count)), Gratuitous: ${arp_garp_count:-0}, RFC 5227 Probes: ${arp_probe_count:-0})"
+    fi
+    echo -e "  IPv4 ARP Resolution Frames  : ${arp_count}${arp_detail}"
     echo -e "  IPv6 NDP Resolution Frames  : ${ndp_count} (NS: ${ndp_ns:-0}, NA: ${ndp_na:-0}, RS: ${ndp_rs:-0}, RA: ${ndp_ra:-0}, Redirect: ${ndp_redirect:-0})"
 
     # Overlay Networks & Tunnels
@@ -581,6 +647,11 @@ analyze_session() {
     fi
     if [[ "${sctp_count}" -gt 0 ]]; then
         echo -e "  ${C_RED}[ALERT] SCTP Telecom Signaling:${C_RESET} ${sctp_count} IP/132 carrier packet(s)."
+        local sctp_chunks
+        sctp_chunks=$(grep -oE '\[(HB REQ|HB ACK|INIT|INIT ACK|SACK|DATA|ABORT|SHUTDOWN)\]' "${dump_file}" 2>/dev/null | sort -u || true)
+        if [[ -n "${sctp_chunks}" ]]; then
+            echo -e "    -> SCTP Chunks Observed : $(echo "${sctp_chunks}" | tr '\n' ' ')"
+        fi
         tunnels_found=1
     fi
     if [[ "${isis_count}" -gt 0 ]]; then
@@ -631,6 +702,11 @@ flow_counter = Counter()
 
 dump_path = sys.argv[1]
 out_json = sys.argv[2]
+latency_txt = sys.argv[3] if len(sys.argv) > 3 else None
+
+syn_times = {}
+handshake_deltas = []
+cur_ts = None
 
 def parse_endpoint(ep):
     ep = ep.strip().rstrip(":,")
@@ -654,6 +730,9 @@ def parse_endpoint(ep):
 try:
     with open(dump_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
+            m_ts = re.match(r"^([0-9]{2}):([0-9]{2}):([0-9]{2}\.[0-9]+)", line)
+            if m_ts:
+                cur_ts = int(m_ts.group(1)) * 3600 + int(m_ts.group(2)) * 60 + float(m_ts.group(3))
             if " > " not in line:
                 continue
             cleaned = re.sub(r"^[0-9:.]+ +[0-9a-fA-F:]{17} +> +[0-9a-fA-F:]{17},? *", "", line)
@@ -684,6 +763,18 @@ try:
                                 flow_counter[flow] += 1
                     except Exception:
                         pass
+                    if p1 and p2 and cur_ts is not None and "Flags [" in line:
+                        fl_m = re.search(r"Flags\s+\[([^\]]+)\]", line)
+                        if fl_m:
+                            flags = fl_m.group(1)
+                            if flags == "S":
+                                syn_times[(ip1, p1, ip2, p2)] = cur_ts
+                            elif "S" in flags and "." in flags:
+                                rev = (ip2, p2, ip1, p1)
+                                if rev in syn_times:
+                                    delta_ms = (cur_ts - syn_times[rev]) * 1000.0
+                                    if delta_ms >= 0:
+                                        handshake_deltas.append(delta_ms)
 except Exception:
     pass
 
@@ -698,7 +789,18 @@ result = {
 }
 with open(out_json, "w", encoding="utf-8") as out_f:
     json.dump(result, out_f, indent=2)
-' "${dump_file}" "${TEMP_DIR}/top_talkers.json" 2>/dev/null || true
+
+if latency_txt and handshake_deltas:
+    try:
+        with open(latency_txt, "w", encoding="utf-8") as lf:
+            lf.write(f"  TCP Handshake Latency (RTT) : min: {min(handshake_deltas):.2f}ms | avg: {sum(handshake_deltas)/len(handshake_deltas):.2f}ms | max: {max(handshake_deltas):.2f}ms ({len(handshake_deltas)} handshakes measured)\n")
+    except Exception:
+        pass
+' "${dump_file}" "${TEMP_DIR}/top_talkers.json" "${TEMP_DIR}/tcp_latency.txt" 2>/dev/null || true
+
+    if [[ -s "${TEMP_DIR}/tcp_latency.txt" ]]; then
+        cat "${TEMP_DIR}/tcp_latency.txt"
+    fi
 
     if [[ -f "${TEMP_DIR}/top_talkers.json" ]]; then
         python3 -B -c '
@@ -784,6 +886,28 @@ except Exception:
     # DHCP Snooping / DHCP Analysis
     if [[ "${dhcp_count}" -gt 0 ]]; then
         echo -e "  ${C_CYAN}DHCP Infrastructure Active:${C_RESET} ${dhcp_count} DHCP broadcast/relay packets observed."
+        local dhcp_types dhcp_servers dhcp_leases dhcp_dns_servers dhcp_domains
+        dhcp_types=$(grep -oE "DHCP-Message \([0-9]+\), length [0-9]+: [a-zA-Z]+" "${dump_file}" 2>/dev/null | awk '{print $NF}' | sort -u || true)
+        dhcp_servers=$(grep -oE "Server-ID \([0-9]+\), length [0-9]+: [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "${dump_file}" 2>/dev/null | awk '{print $NF}' | sort -u || true)
+        dhcp_leases=$(grep -oE "Lease-Time \([0-9]+\), length [0-9]+: [0-9a-zA-Z]+" "${dump_file}" 2>/dev/null | awk '{print $NF}' | sort -u || true)
+        dhcp_dns_servers=$(grep -oE "Domain-Name-Server \([0-9]+\), length [0-9]+: [0-9\., ]+" "${dump_file}" 2>/dev/null | sed -E 's/.*: //' | tr ',' '\n' | sort -u || true)
+        dhcp_domains=$(sed -nE 's/.*Domain-Name \([0-9]+\), length [0-9]+: "([^"]+)".*/\1/p' "${dump_file}" 2>/dev/null | sort -u || true)
+
+        if [[ -n "${dhcp_types}" ]]; then
+            echo -e "    -> DHCPv4 Message Types (Opt 53)      : $(echo "${dhcp_types}" | paste -sd, -)"
+        fi
+        if [[ -n "${dhcp_servers}" ]]; then
+            echo -e "    -> DHCPv4 Server Identifiers (Opt 54) : $(echo "${dhcp_servers}" | paste -sd, -)"
+        fi
+        if [[ -n "${dhcp_leases}" ]]; then
+            echo -e "    -> DHCPv4 Lease Times (Opt 51)        : $(echo "${dhcp_leases}" | paste -sd, -)"
+        fi
+        if [[ -n "${dhcp_dns_servers}" ]]; then
+            echo -e "    -> DHCPv4 DNS Servers (Opt 6)         : $(echo "${dhcp_dns_servers}" | paste -sd, -)"
+        fi
+        if [[ -n "${dhcp_domains}" ]]; then
+            echo -e "    -> DHCPv4 Domain Names (Opt 15)       : $(echo "${dhcp_domains}" | paste -sd, -)"
+        fi
     else
         echo "  [ -- ] DHCP: No DHCP Discover/Offer packets observed."
     fi

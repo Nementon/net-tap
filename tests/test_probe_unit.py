@@ -77,7 +77,10 @@ class TestProbeUnit(unittest.TestCase):
         self.assertTrue(pkt_vlan.haslayer(Dot1Q))
         self.assertEqual(pkt_vlan[Dot1Q].vlan, 100)
         self.assertEqual(pkt_vlan[Dot1Q].prio, 3)
-        self.assertEqual(pkt_vlan[Dot1Q].id, 1)
+        dei_val = getattr(pkt_vlan[Dot1Q], "dei", None)
+        if dei_val is None:
+            dei_val = getattr(pkt_vlan[Dot1Q], "id", 0)
+        self.assertEqual(dei_val, 1)
 
         # 3. 802.1ad QinQ Double-Tagged
         pkt_qinq = probe.wrap_l2(dummy_payload, dst_mac=dst_mac, src_mac=src_mac, qinq=(200, 300), pcp=5, dei=0, qinq_tpid=0x88a8)
@@ -114,19 +117,18 @@ class TestProbeUnit(unittest.TestCase):
         self.assertEqual(data["custom_field"], "val")
         self.assertTrue("timestamp" in data)
 
-    @patch("socket.socket")
-    def test_create_probe_socket_watermark(self, mock_socket_cls):
+    def test_create_probe_socket_watermark(self):
         """Test that create_probe_socket sets SO_MARK 0x7a9 (1961)."""
         mock_sock = MagicMock()
-        mock_socket_cls.return_value = mock_sock
-
-        sock = probe.create_probe_socket("dummy0")
-        self.assertEqual(sock, mock_sock)
-        mock_socket_cls.assert_called_once_with(probe.socket.AF_PACKET, probe.socket.SOCK_RAW)
-        mock_sock.setsockopt.assert_called_once_with(
-            probe.socket.SOL_SOCKET, probe.SO_MARK, probe.PROBE_FWMARK
-        )
-        mock_sock.bind.assert_called_once_with(("dummy0", 0))
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch("socket.socket", return_value=mock_sock) as mock_socket_cls:
+            sock = probe.create_probe_socket("dummy0")
+            self.assertEqual(sock, mock_sock)
+            mock_socket_cls.assert_called_once_with(probe.AF_PACKET, probe.socket.SOCK_RAW)
+            mock_sock.setsockopt.assert_called_once_with(
+                probe.socket.SOL_SOCKET, probe.SO_MARK, probe.PROBE_FWMARK
+            )
+            mock_sock.bind.assert_called_once_with(("dummy0", 0))
 
     def test_resolve_dst_mac_rfc2464_unicast(self):
         """Verify RFC 2464 compliant fallback for unresolved IPv6 unicast targets."""
@@ -351,8 +353,8 @@ class TestProbeUnit(unittest.TestCase):
             dns_pkt = captured_packets[0]
             self.assertTrue(dns_pkt.haslayer(DNS))
             self.assertEqual(dns_pkt[DNS].id, probe.PROBE_FWMARK)  # Watermark 1961
-            self.assertEqual(dns_pkt[DNS].qd.qclass, 3)  # CHAOS
-            self.assertEqual(dns_pkt[DNS].qd.qname, b"version.bind.")
+            self.assertEqual(dns_pkt[DNS].qd[0].qclass, 3)  # CHAOS
+            self.assertEqual(dns_pkt[DNS].qd[0].qname, b"version.bind.")
         finally:
             if os.path.exists(audit_path):
                 os.unlink(audit_path)
@@ -471,14 +473,17 @@ class TestProbeUnit(unittest.TestCase):
 
     def test_get_iface_mac_fallback_sysfs_and_default(self):
         """Test sysfs address file reading and default fallback when ioctl fails."""
-        with patch("socket.socket") as mock_sock_cls, \
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch("socket.socket") as mock_sock_cls, \
              patch("builtins.open", unittest.mock.mock_open(read_data="00:11:22:33:44:55\n")):
             mock_sock_cls.side_effect = OSError("ioctl failed")
             mac = probe.get_iface_mac("eth_test")
             self.assertEqual(mac, "00:11:22:33:44:55")
 
-        with patch("socket.socket") as mock_sock_cls, \
-             patch("builtins.open", side_effect=OSError("no sysfs")):
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch("socket.socket") as mock_sock_cls, \
+             patch("builtins.open", side_effect=OSError("no sysfs")), \
+             patch("subprocess.run", side_effect=Exception("no ifconfig")):
             mock_sock_cls.side_effect = OSError("ioctl failed")
             mac = probe.get_iface_mac("eth_test")
             self.assertEqual(mac, "02:00:00:aa:bb:cc")
@@ -486,7 +491,8 @@ class TestProbeUnit(unittest.TestCase):
     def test_get_link_local_ipv6_variants(self):
         """Test procfs if_inet6 parsing, ifconfig parsing, EUI-64 derivation, and fallback."""
         inet6_data = "fe80000000000000020000fffeaabbcc 02 40 20 80 eth0\n"
-        with patch("os.path.exists", return_value=True), \
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch("os.path.exists", return_value=True), \
              patch("builtins.open", unittest.mock.mock_open(read_data=inet6_data)):
             ll = probe.get_link_local_ipv6("eth0")
             self.assertEqual(ll, str(ipaddress.IPv6Address("fe80::200:ff:feaa:bbcc")))
@@ -550,50 +556,53 @@ class TestProbeUnit(unittest.TestCase):
         self.assertEqual(probe.resolve_dst_mac("eth0", "invalid_ip", is_v6=False), "ff:ff:ff:ff:ff:ff")
         self.assertEqual(probe.resolve_dst_mac("eth0", "invalid_ip", is_v6=True), "33:33:00:00:00:01")
 
-        with patch("subprocess.run") as mock_sub:
-            mock_sub.side_effect = [
-                MagicMock(returncode=0, stdout="8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.50\n"),
-                MagicMock(returncode=0, stdout="192.168.1.1 dev eth0 lladdr 00:aa:bb:cc:dd:ee REACHABLE\n")
-            ]
-            gw_mac = probe.resolve_dst_mac("eth_route_test", "8.8.8.8", is_v6=False)
-            self.assertEqual(gw_mac, "00:aa:bb:cc:dd:ee")
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch.object(probe.socket, "AF_PACKET", 17, create=True):
+            with patch("subprocess.run") as mock_sub:
+                mock_sub.side_effect = [
+                    MagicMock(returncode=0, stdout="8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.50\n"),
+                    MagicMock(returncode=0, stdout="192.168.1.1 dev eth0 lladdr 00:aa:bb:cc:dd:ee REACHABLE\n")
+                ]
+                gw_mac = probe.resolve_dst_mac("eth_route_test", "8.8.8.8", is_v6=False)
+                self.assertEqual(gw_mac, "00:aa:bb:cc:dd:ee")
 
-        proc_arp = "IP address       HW type     Flags       HW address            Mask     Device\n192.168.1.200    0x1         0x2         00:50:56:c0:00:08     *        eth_arp\n"
-        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
-             patch("os.path.exists", return_value=True), \
-             patch("builtins.open", unittest.mock.mock_open(read_data=proc_arp)):
-            mac = probe.resolve_dst_mac("eth_arp", "192.168.1.200", is_v6=False)
-            self.assertEqual(mac, "00:50:56:c0:00:08")
+            proc_arp = "IP address       HW type     Flags       HW address            Mask     Device\n192.168.1.200    0x1         0x2         00:50:56:c0:00:08     *        eth_arp\n"
+            with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
+                 patch("os.path.exists", return_value=True), \
+                 patch("builtins.open", unittest.mock.mock_open(read_data=proc_arp)):
+                mac = probe.resolve_dst_mac("eth_arp", "192.168.1.200", is_v6=False)
+                self.assertEqual(mac, "00:50:56:c0:00:08")
 
-        mock_raw_sock = MagicMock()
-        mock_raw_sock.__enter__.return_value = mock_raw_sock
-        na_reply = Ether(src="aa:bb:cc:11:22:33", dst="02:00:00:aa:bb:cc") / IPv6(src="2001:db8::9", dst="fe80::1") / ICMPv6ND_NA(tgt="2001:db8::9")
-        mock_raw_sock.recv.return_value = bytes(na_reply)
+            mock_raw_sock = MagicMock()
+            mock_raw_sock.__enter__.return_value = mock_raw_sock
+            na_reply = Ether(src="aa:bb:cc:11:22:33", dst="02:00:00:aa:bb:cc") / IPv6(src="2001:db8::9", dst="fe80::1") / ICMPv6ND_NA(tgt="2001:db8::9")
+            mock_raw_sock.recv.return_value = bytes(na_reply)
 
-        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
-             patch("socket.socket", return_value=mock_raw_sock):
-            resolved = probe.resolve_dst_mac(
-                "eth_preflight", "2001:db8::9", is_v6=True,
-                src_mac="02:00:00:aa:bb:cc", src_ip="fe80::1"
-            )
-            self.assertEqual(resolved, "aa:bb:cc:11:22:33")
+            with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
+                 patch("socket.socket", return_value=mock_raw_sock):
+                resolved = probe.resolve_dst_mac(
+                    "eth_preflight", "2001:db8::9", is_v6=True,
+                    src_mac="02:00:00:aa:bb:cc", src_ip="fe80::1"
+                )
+                self.assertEqual(resolved, "aa:bb:cc:11:22:33")
 
-        mock_raw_sock_arp = MagicMock()
-        mock_raw_sock_arp.__enter__.return_value = mock_raw_sock_arp
-        arp_reply = Ether(src="bb:cc:dd:22:33:44", dst="02:00:00:aa:bb:cc") / ARP(op=2, hwsrc="bb:cc:dd:22:33:44", psrc="192.168.99.50")
-        mock_raw_sock_arp.recv.return_value = bytes(arp_reply)
+            mock_raw_sock_arp = MagicMock()
+            mock_raw_sock_arp.__enter__.return_value = mock_raw_sock_arp
+            arp_reply = Ether(src="bb:cc:dd:22:33:44", dst="02:00:00:aa:bb:cc") / ARP(op=2, hwsrc="bb:cc:dd:22:33:44", psrc="192.168.99.50")
+            mock_raw_sock_arp.recv.return_value = bytes(arp_reply)
 
-        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
-             patch("socket.socket", return_value=mock_raw_sock_arp):
-            resolved_arp = probe.resolve_dst_mac(
-                "eth_preflight_arp", "192.168.99.50", is_v6=False,
-                src_mac="02:00:00:aa:bb:cc", src_ip="192.168.99.1"
-            )
-            self.assertEqual(resolved_arp, "bb:cc:dd:22:33:44")
+            with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
+                 patch("socket.socket", return_value=mock_raw_sock_arp):
+                resolved_arp = probe.resolve_dst_mac(
+                    "eth_preflight_arp", "192.168.99.50", is_v6=False,
+                    src_mac="02:00:00:aa:bb:cc", src_ip="192.168.99.1"
+                )
+                self.assertEqual(resolved_arp, "bb:cc:dd:22:33:44")
 
     def test_create_probe_socket_permission_and_os_error(self):
         """Test create_probe_socket error handling for PermissionError and OSError."""
-        with patch("sys.stderr", new_callable=io.StringIO):
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch("sys.stderr", new_callable=io.StringIO):
             with patch("socket.socket", side_effect=PermissionError("Permission denied")):
                 with self.assertRaises(SystemExit) as cm:
                     probe.create_probe_socket("eth0")
@@ -701,7 +710,10 @@ class TestProbeUnit(unittest.TestCase):
             inner = outer.payload[Dot1Q]
             self.assertEqual(inner.vlan, 200)
             self.assertEqual(inner.prio, 5)
-            self.assertEqual(inner.id, 1)
+            inner_dei = getattr(inner, "dei", None)
+            if inner_dei is None:
+                inner_dei = getattr(inner, "id", 0)
+            self.assertEqual(inner_dei, 1)
         finally:
             if os.path.exists(audit_path):
                 os.unlink(audit_path)
@@ -786,14 +798,16 @@ class TestProbeUnit(unittest.TestCase):
         mock_sock = MagicMock()
         mock_sock.__enter__.return_value = mock_sock
         fake_info = b"\x00" * 18 + b"\xaa\xbb\xcc\xdd\xee\xff" + b"\x00" * 200
-        with patch("socket.socket", return_value=mock_sock), \
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch("socket.socket", return_value=mock_sock), \
              patch("fcntl.ioctl", return_value=fake_info):
             mac = probe.get_iface_mac("eth_test")
             self.assertEqual(mac, "aa:bb:cc:dd:ee:ff")
 
     def test_resolve_dst_mac_ipv6_neigh(self):
         """Test destination MAC resolution via ip -6 neigh show."""
-        with patch("subprocess.run") as mock_sub:
+        with patch.object(probe, "IS_DARWIN", False), \
+             patch("subprocess.run") as mock_sub:
             mock_sub.side_effect = [
                 MagicMock(returncode=0, stdout="2001:db8::1 dev eth_test_v6 src 2001:db8::2\n"),
                 MagicMock(returncode=0, stdout="2001:db8::1 dev eth_test_v6 lladdr 33:44:55:66:77:88 REACHABLE\n")
@@ -1038,6 +1052,7 @@ class TestProbeUnit(unittest.TestCase):
 \tstatus: active
 """
         with patch.object(probe, "IS_DARWIN", True), \
+             patch("scapy.arch.get_if_hwaddr", side_effect=Exception("no scapy hwaddr")), \
              patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=ifconfig_out)):
             mac = probe.get_iface_mac("en0")
             self.assertEqual(mac, "00:11:22:aa:bb:cc")
@@ -1047,6 +1062,13 @@ class TestProbeUnit(unittest.TestCase):
 
             src_ip6 = probe.resolve_source_ipv6("en0", target_ip="2001:db8::1")
             self.assertEqual(src_ip6, "2001:db8::100")
+
+    def test_darwin_iface_mac_scapy_arch(self):
+        """Test Darwin MAC resolution via scapy.arch.get_if_hwaddr."""
+        with patch.object(probe, "IS_DARWIN", True), \
+             patch("scapy.arch.get_if_hwaddr", return_value="00:11:22:33:44:55"):
+            mac = probe.get_iface_mac("en0")
+            self.assertEqual(mac, "00:11:22:33:44:55")
 
 
 class TestPlatformHelpers(unittest.TestCase):
@@ -1080,6 +1102,7 @@ class TestPlatformHelpers(unittest.TestCase):
         self.assertIn("bash", comm.lower())
         self.assertIn("bash", cmdline.lower())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux platform required for native Linux stat helpers")
     def test_linux_stat_helpers(self):
         """Test Linux platform_stat_owner, platform_stat_perm, platform_stat_nlinks, and platform_stat_mtime."""
         with tempfile.NamedTemporaryFile() as tmp:
@@ -1095,6 +1118,7 @@ class TestPlatformHelpers(unittest.TestCase):
             self.assertEqual(int(nlinks), 1)
             self.assertGreater(int(mtime), 0)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux platform required for native Linux proc helpers")
     def test_linux_proc_helpers(self):
         """Test Linux platform_proc_starttime, platform_proc_comm, and platform_proc_cmdline."""
         cmd = f"""

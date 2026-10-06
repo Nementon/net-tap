@@ -5,7 +5,7 @@ Tests all 10 active probe types, 802.1Q/802.1ad tagging, watermark compliance, a
 without requiring root privileges or real network interfaces.
 """
 
-import datetime
+import errno
 import io
 import ipaddress
 import json
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 import probe
 from scapy.all import (
     Ether, Dot1Q, ARP, IP, IPv6, ICMP, UDP, BOOTP, DHCP, TCP,
-    ICMPv6ND_NS, ICMPv6ND_RS, ICMPv6EchoRequest, DNS, Raw
+    ICMPv6ND_RS, ICMPv6ND_NA, ICMPv6EchoRequest, DNS
 )
 
 
@@ -34,7 +34,7 @@ class TestProbeUnit(unittest.TestCase):
         self.assertEqual(probe.parse_vlan_spec("10,20,30"), [10, 20, 30])
         self.assertEqual(probe.parse_vlan_spec("10-14"), [10, 11, 12, 13, 14])
         self.assertEqual(probe.parse_vlan_spec("10,20-22,50"), [10, 20, 21, 22, 50])
-        
+
         # Test range deduplication
         self.assertEqual(probe.parse_vlan_spec("10,10,11-12"), [10, 11, 12])
 
@@ -52,7 +52,7 @@ class TestProbeUnit(unittest.TestCase):
         """Test MAC address retrieval and explicit format validation."""
         valid_mac = "aa:bb:cc:dd:ee:ff"
         self.assertEqual(probe.get_iface_mac("dummy0", valid_mac), valid_mac)
-        
+
         # Invalid MAC formats should not be accepted as explicit overrides
         invalid_macs = ["notamac", "aa:bb:cc:dd:ee", "aa:bb:cc:dd:ee:ff:11", "zz:bb:cc:dd:ee:ff"]
         for inv in invalid_macs:
@@ -120,22 +120,26 @@ class TestProbeUnit(unittest.TestCase):
         mock_socket_cls.return_value = mock_sock
 
         sock = probe.create_probe_socket("dummy0")
+        self.assertEqual(sock, mock_sock)
         mock_socket_cls.assert_called_once_with(probe.socket.AF_PACKET, probe.socket.SOCK_RAW)
         mock_sock.setsockopt.assert_called_once_with(
             probe.socket.SOL_SOCKET, probe.SO_MARK, probe.PROBE_FWMARK
         )
         mock_sock.bind.assert_called_once_with(("dummy0", 0))
 
-    def test_resolve_dst_mac_rfc4291_unicast(self):
-        """Verify that unicast IPv6 destination MAC resolution never falls back to multicast MAC."""
+    def test_resolve_dst_mac_rfc2464_unicast(self):
+        """Verify RFC 2464 compliant fallback for unresolved IPv6 unicast targets."""
         with patch("subprocess.run") as mock_sub:
             # Simulate neighbor cache miss
             mock_sub.return_value = MagicMock(returncode=1, stdout="", splitlines=lambda: [])
-            
-            # For a unicast IPv6 target, fallback should be broadcast MAC, NOT solicited multicast
+
+            # For a unicast IPv6 target, default fallback should be RFC 2464 compliant all-nodes multicast
             dst_mac = probe.resolve_dst_mac("dummy0", "2001:db8::50", is_v6=True)
-            self.assertEqual(dst_mac, "ff:ff:ff:ff:ff:ff")
-            self.assertFalse(dst_mac.startswith("33:33:ff"))
+            self.assertEqual(dst_mac, "33:33:00:00:00:01")
+
+            # With broadcast mode explicitly enabled, fallback is ff:ff:ff:ff:ff:ff
+            dst_mac_bcast = probe.resolve_dst_mac("dummy0", "2001:db8::50", is_v6=True, fallback_mode="broadcast")
+            self.assertEqual(dst_mac_bcast, "ff:ff:ff:ff:ff:ff")
 
             # For an actual multicast IPv6 target, multicast MAC is returned
             mcast_mac = probe.resolve_dst_mac("dummy0", "ff02::1", is_v6=True)
@@ -161,14 +165,14 @@ class TestProbeUnit(unittest.TestCase):
         try:
             with patch.object(sys, "argv", test_args):
                 probe.main()
-            
+
             # /30 has 2 usable host addresses (192.168.1.1, 192.168.1.2)
             self.assertEqual(len(captured_packets), 2)
             for pkt in captured_packets:
                 self.assertTrue(pkt.haslayer(ARP))
                 self.assertEqual(pkt[ARP].op, 1)  # ARP Who-has
                 self.assertEqual(pkt[Ether].dst, "ff:ff:ff:ff:ff:ff")
-            
+
             with open(audit_path, "r") as f:
                 lines = f.readlines()
             self.assertEqual(len(lines), 2)
@@ -206,17 +210,17 @@ class TestProbeUnit(unittest.TestCase):
                 self.assertTrue(pkt.haslayer(TCP))
                 self.assertEqual(pkt[TCP].flags, "S")
                 self.assertEqual(pkt[IP].id, probe.PROBE_FWMARK)  # Wire watermark 1961
-                
+
                 # Verify options exist
                 opt_names = [opt[0] for opt in pkt[TCP].options]
                 self.assertIn("MSS", opt_names)
                 self.assertIn("WScale", opt_names)
                 self.assertIn("SAckOK", opt_names)
                 self.assertIn("Timestamp", opt_names)
-                
+
                 # Check ISN starts near 1961000 and is not static
                 isns.append(pkt[TCP].seq)
-            
+
             # Assert ISNs differ across ports to prevent stateful firewall collisions
             self.assertNotEqual(isns[0], isns[1])
         finally:
@@ -464,6 +468,492 @@ class TestProbeUnit(unittest.TestCase):
         # IPv6 Explicit override
         self.assertEqual(probe.resolve_source_ipv6("dummy0", "2001:db8::1", explicit_src="2001:db8::99"), "2001:db8::99")
 
+    def test_get_iface_mac_fallback_sysfs_and_default(self):
+        """Test sysfs address file reading and default fallback when ioctl fails."""
+        with patch("socket.socket") as mock_sock_cls, \
+             patch("builtins.open", unittest.mock.mock_open(read_data="00:11:22:33:44:55\n")):
+            mock_sock_cls.side_effect = OSError("ioctl failed")
+            mac = probe.get_iface_mac("eth_test")
+            self.assertEqual(mac, "00:11:22:33:44:55")
+
+        with patch("socket.socket") as mock_sock_cls, \
+             patch("builtins.open", side_effect=OSError("no sysfs")):
+            mock_sock_cls.side_effect = OSError("ioctl failed")
+            mac = probe.get_iface_mac("eth_test")
+            self.assertEqual(mac, "02:00:00:aa:bb:cc")
+
+    def test_get_link_local_ipv6_variants(self):
+        """Test procfs if_inet6 parsing, EUI-64 derivation, and fallback."""
+        inet6_data = "fe80000000000000020000fffeaabbcc 02 40 20 80 eth0\n"
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", unittest.mock.mock_open(read_data=inet6_data)):
+            ll = probe.get_link_local_ipv6("eth0")
+            self.assertEqual(ll, str(ipaddress.IPv6Address("fe80::200:ff:feaa:bbcc")))
+
+        with patch("os.path.exists", return_value=False), \
+             patch("probe.get_iface_mac", return_value="00:11:22:33:44:55"):
+            ll = probe.get_link_local_ipv6("eth0")
+            self.assertTrue(ll.startswith("fe80::"))
+            self.assertIn("ff:fe", ll)
+
+        with patch("os.path.exists", return_value=False), \
+             patch("probe.get_iface_mac", side_effect=Exception("error")):
+            ll = probe.get_link_local_ipv6("eth0")
+            self.assertEqual(ll, "fe80::1")
+
+    def test_resolve_source_ip_variants(self):
+        """Test IP interface parsing, testnet 192.0.2.x, and gateway target derivations."""
+        ip_addr_out = "    inet 10.10.10.5/24 brd 10.10.10.255 scope global eth0"
+        with patch("subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(stdout=ip_addr_out)
+            self.assertEqual(probe.resolve_source_ip("eth0"), "10.10.10.5")
+
+        with patch("subprocess.run", side_effect=Exception("no ip command")):
+            self.assertEqual(probe.resolve_source_ip("eth0", target_ip="192.0.2.1"), "192.0.2.2")
+            self.assertEqual(probe.resolve_source_ip("eth0", target_ip="192.0.2.2"), "192.0.2.1")
+            self.assertEqual(probe.resolve_source_ip("eth0", target_ip="192.168.1.254"), "192.168.1.2")
+            self.assertEqual(probe.resolve_source_ip("eth0", target_ip="192.168.1.2"), "192.168.1.3")
+            self.assertEqual(probe.resolve_source_ip("eth0", target_ip="192.168.1.10"), "192.168.1.2")
+            self.assertEqual(probe.resolve_source_ip("eth0", target_ip=""), "192.0.2.2")
+
+    def test_resolve_source_ipv6_variants(self):
+        """Test IPv6 global address interface lookup and link-local fallback."""
+        ip6_addr_out = "    inet6 2001:db8:acad::1/64 scope global dynamic"
+        with patch("subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(stdout=ip6_addr_out)
+            src = probe.resolve_source_ipv6("eth0", target_ip="2001:db8:acad::100")
+            self.assertEqual(src, "2001:db8:acad::1")
+
+        with patch("subprocess.run", side_effect=Exception("error")), \
+             patch("probe.get_link_local_ipv6", return_value="fe80::1"):
+            src = probe.resolve_source_ipv6("eth0", target_ip="fe80::50")
+            self.assertEqual(src, "fe80::1")
+
+    def test_resolve_dst_mac_cache_and_protocols(self):
+        """Test destination MAC resolution caching, IPv4 mcast/bcast, route lookup, proc arp, and preflight."""
+        self.assertEqual(probe.resolve_dst_mac("eth0", "255.255.255.255", is_v6=False), "ff:ff:ff:ff:ff:ff")
+        self.assertEqual(probe.resolve_dst_mac("eth0", "224.0.0.5", is_v6=False), "01:00:5e:00:00:05")
+        self.assertEqual(probe.resolve_dst_mac("eth0", "ff02::2", is_v6=True), "33:33:00:00:00:02")
+
+        probe.MAC_RESOLUTION_CACHE[("dummy_cache", "10.0.0.1", False, None, None, 0, 0, 0x88a8, "multicast")] = "11:22:33:44:55:66"
+        self.assertEqual(probe.resolve_dst_mac("dummy_cache", "10.0.0.1", is_v6=False), "11:22:33:44:55:66")
+
+        self.assertEqual(probe.resolve_dst_mac("eth0", "invalid_ip", is_v6=False), "ff:ff:ff:ff:ff:ff")
+        self.assertEqual(probe.resolve_dst_mac("eth0", "invalid_ip", is_v6=True), "33:33:00:00:00:01")
+
+        with patch("subprocess.run") as mock_sub:
+            mock_sub.side_effect = [
+                MagicMock(returncode=0, stdout="8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.50\n"),
+                MagicMock(returncode=0, stdout="192.168.1.1 dev eth0 lladdr 00:aa:bb:cc:dd:ee REACHABLE\n")
+            ]
+            gw_mac = probe.resolve_dst_mac("eth_route_test", "8.8.8.8", is_v6=False)
+            self.assertEqual(gw_mac, "00:aa:bb:cc:dd:ee")
+
+        proc_arp = "IP address       HW type     Flags       HW address            Mask     Device\n192.168.1.200    0x1         0x2         00:50:56:c0:00:08     *        eth_arp\n"
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", unittest.mock.mock_open(read_data=proc_arp)):
+            mac = probe.resolve_dst_mac("eth_arp", "192.168.1.200", is_v6=False)
+            self.assertEqual(mac, "00:50:56:c0:00:08")
+
+        mock_raw_sock = MagicMock()
+        mock_raw_sock.__enter__.return_value = mock_raw_sock
+        na_reply = Ether(src="aa:bb:cc:11:22:33", dst="02:00:00:aa:bb:cc") / IPv6(src="2001:db8::9", dst="fe80::1") / ICMPv6ND_NA(tgt="2001:db8::9")
+        mock_raw_sock.recv.return_value = bytes(na_reply)
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
+             patch("socket.socket", return_value=mock_raw_sock):
+            resolved = probe.resolve_dst_mac(
+                "eth_preflight", "2001:db8::9", is_v6=True,
+                src_mac="02:00:00:aa:bb:cc", src_ip="fe80::1"
+            )
+            self.assertEqual(resolved, "aa:bb:cc:11:22:33")
+
+        mock_raw_sock_arp = MagicMock()
+        mock_raw_sock_arp.__enter__.return_value = mock_raw_sock_arp
+        arp_reply = Ether(src="bb:cc:dd:22:33:44", dst="02:00:00:aa:bb:cc") / ARP(op=2, hwsrc="bb:cc:dd:22:33:44", psrc="192.168.99.50")
+        mock_raw_sock_arp.recv.return_value = bytes(arp_reply)
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
+             patch("socket.socket", return_value=mock_raw_sock_arp):
+            resolved_arp = probe.resolve_dst_mac(
+                "eth_preflight_arp", "192.168.99.50", is_v6=False,
+                src_mac="02:00:00:aa:bb:cc", src_ip="192.168.99.1"
+            )
+            self.assertEqual(resolved_arp, "bb:cc:dd:22:33:44")
+
+    def test_create_probe_socket_permission_and_os_error(self):
+        """Test create_probe_socket error handling for PermissionError and OSError."""
+        with patch("socket.socket", side_effect=PermissionError("Permission denied")):
+            with self.assertRaises(SystemExit) as cm:
+                probe.create_probe_socket("eth0")
+            self.assertEqual(cm.exception.code, 1)
+
+        with patch("socket.socket", side_effect=OSError("Device not configured")):
+            with self.assertRaises(SystemExit) as cm:
+                probe.create_probe_socket("eth0")
+            self.assertEqual(cm.exception.code, 1)
+
+    @patch("probe.create_probe_socket")
+    def test_main_tcp_syn_ipv6(self, mock_create_sock):
+        """Test IPv6 TCP SYN probe transmission."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured_packets = []
+        mock_sock.send.side_effect = lambda b: captured_packets.append(Ether(b))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        test_args = [
+            "probe.py", "-i", "dummy0", "-t", "tcp_syn",
+            "--target", "2001:db8::10", "--ports", "8080",
+            "--rate", "500", "--timeout", "2",
+            "--audit-file", audit_path, "--audit-id", "test_tcp_v6"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args):
+                probe.main()
+            self.assertEqual(len(captured_packets), 1)
+            pkt = captured_packets[0]
+            self.assertTrue(pkt.haslayer(IPv6))
+            self.assertTrue(pkt.haslayer(TCP))
+            self.assertEqual(pkt[TCP].dport, 8080)
+            self.assertEqual(pkt[IPv6].fl, probe.PROBE_FWMARK)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    @patch("probe.create_probe_socket")
+    def test_main_pmtu_emsgsize_handling(self, mock_create_sock):
+        """Test PMTU probe logging of local_mtu_exceeded when EMSGSIZE is raised."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+
+        def fake_send(b):
+            err = OSError(errno.EMSGSIZE, "Message too long")
+            err.errno = errno.EMSGSIZE
+            raise err
+
+        mock_sock.send.side_effect = fake_send
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        test_args = [
+            "probe.py", "-i", "dummy0", "-t", "pmtu",
+            "--target", "192.168.1.1",
+            "--rate", "500", "--timeout", "2",
+            "--audit-file", audit_path, "--audit-id", "test_pmtu_emsgsize"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args):
+                probe.main()
+
+            with open(audit_path, "r") as f:
+                lines = f.readlines()
+            self.assertGreater(len(lines), 0)
+            first_entry = json.loads(lines[0])
+            self.assertEqual(first_entry["status"], "local_mtu_exceeded")
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    @patch("probe.create_probe_socket")
+    def test_main_qinq_pcp_dei_attributes(self, mock_create_sock):
+        """Test active probe execution with QinQ tags, 802.1p PCP, and DEI bits."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured_packets = []
+        mock_sock.send.side_effect = lambda b: captured_packets.append(Ether(b))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        test_args = [
+            "probe.py", "-i", "dummy0", "-t", "arp",
+            "--target", "192.168.1.1",
+            "--qinq", "100,200", "--pcp", "5", "--dei", "1",
+            "--qinq-tpid", "0x9100",
+            "--audit-file", audit_path, "--audit-id", "test_qinq_pcp"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args):
+                probe.main()
+
+            self.assertEqual(len(captured_packets), 1)
+            pkt = captured_packets[0]
+            self.assertEqual(pkt[Ether].type, 0x9100)
+            self.assertTrue(pkt.haslayer(Dot1Q))
+            outer = pkt[Dot1Q]
+            self.assertEqual(outer.vlan, 100)
+            self.assertEqual(outer.prio, 5)
+            inner = outer.payload[Dot1Q]
+            self.assertEqual(inner.vlan, 200)
+            self.assertEqual(inner.prio, 5)
+            self.assertEqual(inner.id, 1)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    @patch("probe.create_probe_socket")
+    def test_main_ndp_subnet_and_all_nodes(self, mock_create_sock):
+        """Test NDP scanning against /124 subnet and all-nodes target."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured_packets = []
+        mock_sock.send.side_effect = lambda b: captured_packets.append(Ether(b))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        # 1. /124 subnet
+        test_args_sub = [
+            "probe.py", "-i", "dummy0", "-t", "ndp",
+            "--target", "2001:db8::/124",
+            "--rate", "500", "--timeout", "2",
+            "--audit-file", audit_path, "--audit-id", "test_ndp_sub"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_sub):
+                probe.main()
+            self.assertGreater(len(captured_packets), 1)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+        captured_packets.clear()
+        # 2. all-nodes
+        test_args_nodes = [
+            "probe.py", "-i", "dummy0", "-t", "ndp",
+            "--target", "all-nodes",
+            "--rate", "500", "--timeout", "2",
+            "--audit-file", audit_path, "--audit-id", "test_ndp_nodes"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_nodes):
+                probe.main()
+            self.assertEqual(len(captured_packets), 1)
+            pkt = captured_packets[0]
+            self.assertTrue(pkt.haslayer(ICMPv6EchoRequest))
+            self.assertEqual(pkt[Ether].dst, "33:33:00:00:00:01")
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    def test_main_validation_errors(self):
+        """Test CLI validation exit codes on malformed inputs."""
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        error_cases = [
+            ["probe.py", "-i", "dummy0", "-t", "arp", "--vlans", "9999", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "arp", "--qinq", "invalid", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "arp", "--target", "2001:db8::1", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "arp", "--target", "10.0.0.0/8", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "ndp", "--target", "192.168.1.1", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "nbns", "--target", "2001:db8::1", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "pmtu", "--target", "invalid_ip", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "tcp_syn", "--target", "invalid_ip", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "snmp", "--target", "invalid_ip", "--audit-file", audit_path],
+            ["probe.py", "-i", "dummy0", "-t", "dns", "--target", "invalid_ip", "--audit-file", audit_path],
+        ]
+
+        try:
+            for args in error_cases:
+                with patch.object(sys, "argv", args), \
+                     patch("sys.stderr.write"):
+                    with self.assertRaises(SystemExit) as cm:
+                        probe.main()
+                    self.assertEqual(cm.exception.code, 1)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+
+    def test_get_iface_mac_ioctl_success(self):
+        """Test successful ioctl SIOCGIFHWADDR query."""
+        mock_sock = MagicMock()
+        mock_sock.__enter__.return_value = mock_sock
+        fake_info = b"\x00" * 18 + b"\xaa\xbb\xcc\xdd\xee\xff" + b"\x00" * 200
+        with patch("socket.socket", return_value=mock_sock), \
+             patch("fcntl.ioctl", return_value=fake_info):
+            mac = probe.get_iface_mac("eth_test")
+            self.assertEqual(mac, "aa:bb:cc:dd:ee:ff")
+
+    def test_resolve_dst_mac_ipv6_neigh(self):
+        """Test destination MAC resolution via ip -6 neigh show."""
+        with patch("subprocess.run") as mock_sub:
+            mock_sub.side_effect = [
+                MagicMock(returncode=0, stdout="2001:db8::1 dev eth_test_v6 src 2001:db8::2\n"),
+                MagicMock(returncode=0, stdout="2001:db8::1 dev eth_test_v6 lladdr 33:44:55:66:77:88 REACHABLE\n")
+            ]
+            mac = probe.resolve_dst_mac("eth_test_v6", "2001:db8::1", is_v6=True)
+            self.assertEqual(mac, "33:44:55:66:77:88")
+
+    def test_parse_vlan_spec_extended_edges(self):
+        """Test whitespace padding and malformed range tokens."""
+        self.assertEqual(probe.parse_vlan_spec(" , 10, 20 , "), [10, 20])
+        with self.assertRaises(ValueError):
+            probe.parse_vlan_spec("10-20-30")
+
+    @patch("probe.create_probe_socket")
+    def test_main_snmp_and_dns_ipv6(self, mock_create_sock):
+        """Test SNMP and DNS probes targeting IPv6 destination."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured_packets = []
+        mock_sock.send.side_effect = lambda b: captured_packets.append(Ether(b))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        test_args_snmp = [
+            "probe.py", "-i", "dummy0", "-t", "snmp",
+            "--target", "2001:db8::1",
+            "--audit-file", audit_path, "--audit-id", "test_snmp_v6"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_snmp):
+                probe.main()
+            self.assertEqual(len(captured_packets), 1)
+            pkt = captured_packets[0]
+            self.assertTrue(pkt.haslayer(IPv6))
+            self.assertTrue(pkt.haslayer(UDP))
+            self.assertEqual(pkt[UDP].dport, 161)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+        captured_packets.clear()
+        test_args_dns = [
+            "probe.py", "-i", "dummy0", "-t", "dns",
+            "--target", "2001:db8::1",
+            "--audit-file", audit_path, "--audit-id", "test_dns_v6"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args_dns):
+                probe.main()
+            self.assertEqual(len(captured_packets), 1)
+            pkt = captured_packets[0]
+            self.assertTrue(pkt.haslayer(IPv6))
+            self.assertTrue(pkt.haslayer(UDP))
+            self.assertEqual(pkt[UDP].dport, 53)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    @patch("probe.create_probe_socket")
+    def test_main_ndp_large_prefix(self, mock_create_sock):
+        """Test NDP probing on /64 subnet stepping through offsets."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured_packets = []
+        mock_sock.send.side_effect = lambda b: captured_packets.append(Ether(b))
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        test_args = [
+            "probe.py", "-i", "dummy0", "-t", "ndp",
+            "--target", "2001:db8:beef::/64",
+            "--rate", "500", "--timeout", "2",
+            "--audit-file", audit_path, "--audit-id", "test_ndp_64"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args):
+                probe.main()
+            self.assertEqual(len(captured_packets), 6)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    @patch("probe.create_probe_socket")
+    def test_main_send_error_graceful_handling(self, mock_create_sock):
+        """Test that OSError during packet transmission is handled without unhandled exception."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        mock_sock.send.side_effect = OSError("Network is down")
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        probe_types = [
+            ["-t", "arp", "--target", "192.168.1.1"],
+            ["-t", "ndp", "--target", "ff02::2"],
+            ["-t", "dhcp"],
+            ["-t", "dhcp6"],
+            ["-t", "tcp_syn", "--target", "192.168.1.1", "--ports", "bad,99999"],
+            ["-t", "eapol"],
+            ["-t", "snmp", "--target", "192.168.1.1"],
+            ["-t", "dns", "--target", "192.168.1.1"],
+            ["-t", "nbns", "--target", "192.168.1.1"],
+        ]
+
+        try:
+            for p_args in probe_types:
+                full_args = ["probe.py", "-i", "dummy0", "--audit-file", audit_path, "--qinq-tpid", "invalid"] + p_args
+                with patch.object(sys, "argv", full_args), \
+                     patch("sys.stderr.write"):
+                    probe.main()
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
+    def test_main_audit_file_open_failure(self):
+        """Test that audit file creation failure triggers clean exit."""
+        with patch.object(sys, "argv", ["probe.py", "-i", "dummy0", "-t", "arp", "--audit-file", "/nonexistent/test.jsonl"]), \
+             patch("os.open", side_effect=OSError("Read-only filesystem")), \
+             patch("sys.stderr.write"):
+            with self.assertRaises(SystemExit) as cm:
+                probe.main()
+            self.assertEqual(cm.exception.code, 1)
+
+
+    def test_misc_resilience_and_edge_coverage(self):
+        """Test fallback error branches in IP resolution and preflight sockets."""
+        self.assertIsNotNone(probe.resolve_source_ip("eth0", explicit_src="notanip"))
+        self.assertIsNotNone(probe.resolve_source_ip("eth0", target_ip="notanip"))
+        self.assertIsNotNone(probe.resolve_source_ipv6("eth0", explicit_src="notanip"))
+
+        with patch("subprocess.run", side_effect=Exception("route error")):
+            self.assertIsNotNone(probe.resolve_source_ipv6("eth0", target_ip="2001:db8::1"))
+
+        mock_to_sock = MagicMock()
+        mock_to_sock.__enter__.return_value = mock_to_sock
+        mock_to_sock.recv.side_effect = probe.socket.timeout("timed out")
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")), \
+             patch("socket.socket", return_value=mock_to_sock):
+            mac_v6 = probe.resolve_dst_mac("eth_to_test", "2001:db8::beef", is_v6=True, src_mac="02:00:00:11:22:33", src_ip="fe80::1")
+            self.assertEqual(mac_v6, "33:33:00:00:00:01")
+            mac_v4 = probe.resolve_dst_mac("eth_to_test", "10.99.88.77", is_v6=False, src_mac="02:00:00:11:22:33", src_ip="10.99.88.1")
+            self.assertEqual(mac_v4, "ff:ff:ff:ff:ff:ff")
+
+    @patch("probe.create_probe_socket")
+    def test_main_ndp_flush_interval(self, mock_create_sock):
+        """Test NDP scanning across targets to trigger periodic audit flush."""
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+        captured = []
+        mock_sock.send.side_effect = lambda b: captured.append(b)
+
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            audit_path = tf.name
+
+        test_args = [
+            "probe.py", "-i", "dummy0", "-t", "ndp",
+            "--target", "2001:db8:ffff::/121",
+            "--rate", "5000", "--timeout", "10",
+            "--audit-file", audit_path, "--audit-id", "test_ndp_flush"
+        ]
+        try:
+            with patch.object(sys, "argv", test_args):
+                probe.main()
+            self.assertGreaterEqual(len(captured), 50)
+        finally:
+            if os.path.exists(audit_path):
+                os.unlink(audit_path)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -93,7 +93,7 @@ verify_disk_space() {
     fi
     avail_mb=$(df -Pm "${target_dir}" 2>/dev/null | awk 'NR==2 {print $4}')
     
-    if [[ -z "${avail_mb}" ]] || [[ "${avail_mb}" -lt "${req_mb}" ]]; then
+    if [[ -z "${avail_mb}" || ! "${avail_mb}" =~ ^[0-9]+$ ]] || (( avail_mb < req_mb )); then
         log_err "Insufficient disk space in ${target_dir}."
         log_err "Required: ${req_mb}MB, Available: ${avail_mb:-0}MB."
         exit 1
@@ -192,9 +192,30 @@ load_state_file() {
     # Use declare -g to ensure variables and associative arrays are defined in global caller scope
     # shellcheck source=/dev/null
     source <(printf "%s\n" "${scontent}" | sed 's/^declare /declare -g /')
+    # Validate deserialized variables against strict whitelist patterns
+    if [[ -n "${NETNS:-}" ]] && ! [[ "${NETNS}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+        log_err "Security violation: Deserialized NETNS contains invalid characters."
+        return 1
+    fi
+    if [[ -n "${IFACE:-}" ]] && ! [[ "${IFACE}" =~ ^[a-zA-Z0-9_.,-]+$ ]]; then
+        log_err "Security violation: Deserialized IFACE contains invalid characters."
+        return 1
+    fi
+    if [[ -n "${MODE:-}" ]] && ! [[ "${MODE}" =~ ^(passive|active)$ ]]; then
+        log_err "Security violation: Deserialized MODE contains invalid value."
+        return 1
+    fi
     # Ensure critical execution PATH cannot be hijacked
     export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     return 0
+}
+
+# --- Process Metadata Helper ---
+get_proc_starttime() {
+    local pid="$1"
+    [[ -z "${pid}" || ! -d "/proc/${pid}" ]] && return 0
+    # Field 22 in /proc/[pid]/stat represents process start time after system boot in clock ticks
+    awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null || echo ""
 }
 
 # --- Safe Process Termination Helper ---
@@ -202,6 +223,7 @@ safe_kill() {
     local target_pid="$1"
     local expected_comm="${2:-}"
     local expected_cmd="${3:-}"
+    local expected_starttime="${4:-}"
     [[ -z "${target_pid}" ]] && return 0
 
     if ! [[ "${target_pid}" =~ ^[1-9][0-9]*$ ]]; then
@@ -234,13 +256,20 @@ safe_kill() {
                 return 0
             fi
         fi
+        local initial_starttime
+        initial_starttime=$(get_proc_starttime "${target_pid}")
+        if [[ -n "${expected_starttime}" && -n "${initial_starttime}" && "${initial_starttime}" != "${expected_starttime}" ]]; then
+            log_warn "PID ${target_pid} starttime (${initial_starttime}) did not match expected (${expected_starttime}). Skipping termination to avoid killing recycled process."
+            return 0
+        fi
+
         kill -SIGTERM "${target_pid}" 2>/dev/null || true
         local count=0
         while kill -0 "${target_pid}" 2>/dev/null && [[ $count -lt 20 ]]; do
             sleep 0.1
             count=$((count + 1))
         done
-        # Re-verify process identity before SIGKILL to defend against PID recycling
+        # Re-verify process identity and starttime before SIGKILL to defend against PID recycling
         if kill -0 "${target_pid}" 2>/dev/null; then
             local verify_comm
             verify_comm=$(cat "/proc/${target_pid}/comm" 2>/dev/null || echo "")
@@ -255,6 +284,12 @@ safe_kill() {
                     log_warn "PID ${target_pid} cmdline changed during shutdown. Skipping SIGKILL."
                     return 0
                 fi
+            fi
+            local verify_starttime
+            verify_starttime=$(get_proc_starttime "${target_pid}")
+            if [[ -n "${initial_starttime}" && -n "${verify_starttime}" && "${verify_starttime}" != "${initial_starttime}" ]]; then
+                log_warn "PID ${target_pid} starttime changed during shutdown (${verify_starttime} != ${initial_starttime}). Skipping SIGKILL to avoid killing recycled process."
+                return 0
             fi
             kill -9 "${target_pid}" 2>/dev/null || true
             local kill_count=0

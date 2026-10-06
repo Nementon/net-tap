@@ -6,6 +6,7 @@
 
 set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
+set +m
 
 # Resolve the absolute path to the directory containing this script
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -302,6 +303,15 @@ main() {
             --qinq-tpid)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
                 PROBE_QINQ_TPID="$2"
+                shift 2
+                ;;
+            --fallback-mac-mode)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                if [[ "$2" != "multicast" && "$2" != "broadcast" ]]; then
+                    log_err "Invalid --fallback-mac-mode '$2'. Must be 'multicast' or 'broadcast'."
+                    exit 1
+                fi
+                PROBE_FALLBACK_MAC_MODE="$2"
                 shift 2
                 ;;
             --force)

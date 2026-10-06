@@ -382,6 +382,7 @@ net-tap [on|off|status|analyze|probe|list|clean] [options]
 | - | `--dei` | Drop Eligible Indicator bit (`0` or `1`) for 802.1Q / QinQ tagged frames. | `0` |
 | - | `--qinq-tpid` | Outer VLAN TPID / EtherType (`0x88a8`, `0x8100`, `0x9100`, `0x9200`). | `0x88a8` |
 | - | `--auto-vlans` | Automatically sweep probes across all active 802.1Q VLAN tags passively observed in capture ring buffer. | Disabled |
+| - | `--fallback-mac-mode` | Fallback destination MAC mode for unresolved unicast targets: `multicast` (RFC 2464 all-nodes multicast `33:33:00:00:00:01`) or `broadcast` (`ff:ff:ff:ff:ff:ff`). | `multicast` |
 | - | `--rate` | Maximum probe transmission rate in packets per second (capped at 5000 pps; broadcast capped at 1000 pps). | `50` |
 | - | `--timeout` | Maximum probe duration timeout in seconds. | `5` |
 | - | `--audit-id` | Custom audit identifier for probe session correlation in JSONL log. | Auto |
@@ -844,8 +845,12 @@ To prevent silent kernel drops caused by Martian source addresses (RFC 3704 Reve
    - If the interface has an assigned IPv4 address (`ip -4 addr show`), that IP is used.
    - If probing an unnumbered tap, Net-Tap derives a plausible on-subnet host address (e.g. `.253` or `.2`) within the target's subnet, preventing target hosts from directing return packets away to default gateways.
 2. **Pre-Flight Destination MAC Resolution (`resolve_dst_mac`)**:
-   - Prior to transmitting unicast Layer 4 or PMTU probes, Net-Tap checks the kernel neighbor cache (`/proc/net/arp` and `ip neigh`).
-   - If the target MAC is unpopulated, Net-Tap dynamically emits a single pre-flight ARP request (or ICMPv6 Neighbor Solicitation) stamped with `SO_MARK 0x7a9`, awaiting the reply before transmitting L4 traffic. This avoids falling back to link-layer broadcast `ff:ff:ff:ff:ff:ff` (which RFC 1122 and Linux kernel `ip_input.c` drop for unicast transport protocols).
+   - Prior to transmitting unicast Layer 4, PMTU, or service probes, Net-Tap executes a deterministic multi-tier destination MAC resolution pipeline:
+     - **In-Memory Cache**: Positive and negative resolution caching avoids repetitive lookups.
+     - **Kernel Neighbor Cache**: Queries local ARP (`/proc/net/arp`) and neighbor tables (`ip -4 / -6 neigh show`).
+     - **Kernel Route Lookup**: Runs `ip route get` to determine if the target IP is off-link via a gateway; if so, resolves the next-hop gateway's MAC address (RFC 1812 / RFC 4291).
+     - **Active Pre-Flight Solicitation**: If unpopulated, Net-Tap dynamically emits a single pre-flight ARP request (IPv4) or RFC 4861 ICMPv6 Neighbor Solicitation (IPv6, directed to the target's solicited-node multicast address with Hop Limit 255) stamped with `SO_MARK 0x7a9`, awaiting reply on an ephemeral raw socket with a strict 250ms deadline without parsing PCAP files.
+     - **Deterministic Fallback**: If still unresolvable, IPv4 defaults to `ff:ff:ff:ff:ff:ff`, while IPv6 defaults to RFC 2464 all-nodes multicast (`33:33:00:00:00:01`) or broadcast (`ff:ff:ff:ff:ff:ff`) via `--fallback-mac-mode {multicast|broadcast}`.
 3. **Source MAC Cloning (`--src-mac <mac>`)**:
    - Allows operators to clone passively observed client MAC addresses to bypass switchport sticky-MAC limits or 802.1X quarantine.
 
@@ -1115,8 +1120,25 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
 
 ```json
 {
+  "schema_version": "1.0.0",
   "vlans": ["10", "20", "99"],
   "qinq_frames": 4,
+  "qinq_tuples": ["100,200", "300,400"],
+  "mpls_labels": ["1001", "2001"],
+  "mpls_max_stack_depth": 2,
+  "mobile_core": {
+    "gtp_u": 2,
+    "gtp_c": 1,
+    "pfcp": 0,
+    "active_teids": ["0x00000000", "0x00000001"]
+  },
+  "dhcpv6": {
+    "server_duids": ["0001000120000000020000000001"],
+    "message_types": ["SOLICIT", "ADVERTISE"],
+    "ia_na_addresses": [],
+    "ia_pd_prefixes": [],
+    "dns_servers": ["2001:4860:4860::8888"]
+  },
   "mac_addresses": [
     "00:11:22:33:44:55",
     "00:1a:2b:3c:4d:5e",
@@ -1133,6 +1155,12 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     "10.0.10.1",
     "10.0.20.1"
   ],
+  "ipv4_multicast_groups": [
+    "224.0.0.1",
+    "224.0.0.2",
+    "224.0.0.5",
+    "224.0.0.18"
+  ],
   "ipv6_addresses": [
     "2001:db8:beef::10",
     "2001:db8:beef::100",
@@ -1144,9 +1172,16 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
   "ipv6_routers": [
     "fe80::1"
   ],
+  "ipv6_multicast_groups": [
+    "ff02::1",
+    "ff02::2",
+    "ff02::5",
+    "ff02::1:2"
+  ],
   "resolution": {
     "arp_frames": 14,
     "ndp_frames": 6,
+    "ndp_spoofed_frames": 0,
     "ndp_details": {
       "neighbor_solicitation": 2,
       "neighbor_advertisement": 2,
@@ -1164,12 +1199,17 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     "mpls": 2,
     "six_in_four": 0,
     "four_in_six": 0,
-    "srv6": 0
+    "srv6": 0,
+    "pfcp": 0
   },
   "protocols": {
     "sctp": 1,
     "pmtud": 1,
     "next_hop_mtus": ["1492"],
+    "pcp_cos_distribution": {
+      "0": 10,
+      "3": 2
+    },
     "ipv6_extension_headers": {
       "hop_by_hop": 0,
       "routing": 0,
@@ -1214,6 +1254,9 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     "ospf_routers": ["10.255.255.1"],
     "bgp_asns": ["65001"],
     "dhcp_hostnames": ["srv-dc01"],
+    "dhcpv6_duids": ["0001000120000000020000000001"],
+    "dhcpv6_ia_pd_prefixes": [],
+    "dhcpv6_dns_servers": ["2001:4860:4860::8888"],
     "dns_queries": ["srv-dc01.corp.local", "api.internal.network"],
     "tls_sni": ["login.microsoftonline.com", "telemetry.internal.network"]
   },
@@ -1244,6 +1287,22 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
         "packets": 80
       }
     ]
+  },
+  "physical_layer": {
+    "link_flaps": 0,
+    "optical_ddm": {
+      "rx_power_dbm": -2.35,
+      "tx_power_dbm": -1.82,
+      "tx_bias_ma": 5.4,
+      "lanes": [
+        {
+          "lane": 1,
+          "rx_power_dbm": -2.35,
+          "tx_power_dbm": -1.82,
+          "tx_bias_ma": 5.4
+        }
+      ]
+    }
   },
   "active_audit": {
     "audit_files": ["20261004_143000_eth1_probe_audit.jsonl"],

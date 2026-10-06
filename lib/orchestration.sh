@@ -198,27 +198,30 @@ _disk_watchdog_worker() {
     done
     [[ ! -f "${stfile}" ]] && exit 0
 
+    local poll_cycle=0
     while [[ -f "${stfile}" ]]; do
-        sleep 2 &
+        sleep 1 &
         sleep_pid=$!
         wait "${sleep_pid}" 2>/dev/null || true
         [[ ! -f "${stfile}" ]] && break
+        poll_cycle=$((poll_cycle + 1))
 
-        # Ring-buffer retention enforcement for compressed and uncompressed chunks:
-        # Prevents unbound accumulation of rotated files when using -z gzip
-        IFS=',' read -ra ifc_arr <<< "${ifc}"
-        for dev in "${ifc_arr[@]}"; do
-            local chunk_files=()
-            local pfx="${session_ts:-*}${session_ts:+_}${dev}_trace.pcap*"
-            while IFS= read -r f; do
-                [[ -f "$f" ]] && chunk_files+=("$f")
-            done < <(find "${outdir}" -maxdepth 1 -name "${pfx}" -printf "%T@ %p\n" 2>/dev/null | sort -nr | cut -d' ' -f2-)
-            if [[ ${#chunk_files[@]} -gt ${rot_count} ]]; then
-                for ((idx=rot_count; idx<${#chunk_files[@]}; idx++)); do
-                    rm -f "${chunk_files[$idx]}" 2>/dev/null || true
-                done
-            fi
-        done
+        # Ring-buffer retention enforcement (every 2 cycles to avoid excessive find/stat metadata overhead)
+        if [[ $((poll_cycle % 2)) -eq 0 ]]; then
+            IFS=',' read -ra ifc_arr <<< "${ifc}"
+            for dev in "${ifc_arr[@]}"; do
+                local chunk_files=()
+                local pfx="${session_ts:-*}${session_ts:+_}${dev}_trace.pcap*"
+                while IFS= read -r f; do
+                    [[ -f "$f" ]] && chunk_files+=("$f")
+                done < <(find "${outdir}" -maxdepth 1 -name "${pfx}" -printf "%T@ %p\n" 2>/dev/null | sort -nr | cut -d' ' -f2-)
+                if [[ ${#chunk_files[@]} -gt ${rot_count} ]]; then
+                    for ((idx=rot_count; idx<${#chunk_files[@]}; idx++)); do
+                        rm -f "${chunk_files[$idx]}" 2>/dev/null || true
+                    done
+                fi
+            done
+        fi
 
         # Monitor tcpdump process liveness if PIDs are provided
         if [[ -n "${capture_pids}" ]]; then
@@ -242,8 +245,8 @@ _disk_watchdog_worker() {
         df_stats=$(df -Pm "${outdir}" 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5, $4, $2}')
         read -r current_usage avail_mb total_mb <<< "${df_stats:-0 999999 1000000}"
         local min_headroom=$(( total_mb / 20 ))
-        [[ $min_headroom -gt 1024 ]] && min_headroom=1024
-        [[ $min_headroom -lt 50 ]] && min_headroom=50
+        [[ $min_headroom -gt 2048 ]] && min_headroom=2048
+        [[ $min_headroom -lt 100 ]] && min_headroom=100
         if [[ "${current_usage}" -ge "${thresh}" ]] || [[ "${avail_mb}" -le "${min_headroom}" ]]; then
             if command -v logger >/dev/null 2>&1; then logger -t net-tap "CRITICAL: Storage threshold reached (${current_usage}% >= ${thresh}% or ${avail_mb}MB <= ${min_headroom}MB). Triggering emergency shutdown for ${ifc}."; fi
             local netns_cmd=()
@@ -680,13 +683,13 @@ start_tap() {
     SCRIPT_PATH="${SCRIPT_PATH:-$(readlink -f "$0")}"
     if [[ -n "${DURATION}" ]] && [[ "${DURATION}" =~ ^[0-9]+$ ]]; then
         log_info "Scheduling auto-shutdown in ${DURATION} seconds..."
-        ( for fd in {3..20}; do eval "exec ${fd}>&-" 2>/dev/null; done; _autoshutdown_worker "${DURATION}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" ) >/dev/null 2>&1 &
+        ( _close_lock_fds; exec -a net-tap-autoshutdown "${BASH:-bash}" -c 'source "'"${LIB_DIR}"'/core.sh"; source "'"${LIB_DIR}"'/orchestration.sh"; _autoshutdown_worker "$@"' -- "${DURATION}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" ) >/dev/null 2>&1 &
         PID_AUTOSHUTDOWN=$!
     fi
 
     local THRESH="${DISK_THRESH:-85}"
     log_info "Starting background disk watchdog (threshold: ${THRESH}%)..."
-    ( for fd in {3..20}; do eval "exec ${fd}>&-" 2>/dev/null; done; _disk_watchdog_worker "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" "${TIMESTAMP}" ) >/dev/null 2>&1 &
+    ( _close_lock_fds; exec -a net-tap-watchdog "${BASH:-bash}" -c 'source "'"${LIB_DIR}"'/core.sh"; source "'"${LIB_DIR}"'/orchestration.sh"; _disk_watchdog_worker "$@"' -- "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" "${TIMESTAMP}" ) >/dev/null 2>&1 &
     PID_WATCHDOG=$!
 
     # 8. Secure atomic state serialization
@@ -826,10 +829,10 @@ stop_tap() {
     NETNS="${NETNS:-}"
 
     if [[ -n "${PID_WATCHDOG:-}" && "${PID_WATCHDOG}" -ne $$ && "${PID_WATCHDOG}" -ne "${PPID}" ]]; then
-        safe_kill "${PID_WATCHDOG}" "bash|net-tap|net-tap.sh" "_disk_watchdog_worker|net-tap.*(-i|on)"
+        safe_kill "${PID_WATCHDOG}" "net-tap-watchdo|bash" "net-tap-watchdog|_disk_watchdog_worker"
     fi
     if [[ -n "${PID_AUTOSHUTDOWN:-}" && "${PID_AUTOSHUTDOWN}" -ne $$ && "${PID_AUTOSHUTDOWN}" -ne "${PPID}" ]]; then
-        safe_kill "${PID_AUTOSHUTDOWN}" "bash|net-tap|net-tap.sh" "_autoshutdown_worker|net-tap.*(-i|on)"
+        safe_kill "${PID_AUTOSHUTDOWN}" "net-tap-autoshu|bash" "net-tap-autoshutdown|_autoshutdown_worker"
     fi
 
     # Send SIGTERM in parallel to all capture processes to minimize Tx/Rx capture skew
@@ -1197,7 +1200,7 @@ clean_sessions() {
             read -ra pids_to_kill <<< "${s_pids_str}"
             for p in "${pids_to_kill[@]}"; do
                 if [[ -n "$p" && "$p" =~ ^[0-9]+$ ]]; then
-                    safe_kill "$p" "tcpdump|dmesg|ip|bash|net-tap|net-tap.sh" "tcpdump|dmesg|ip.*monitor|_disk_watchdog|_autoshutdown|net-tap"
+                    safe_kill "$p" "tcpdump|dmesg|ip|net-tap-watchdo|net-tap-autoshu|bash|net-tap|net-tap.sh" "tcpdump|dmesg|ip.*monitor|_disk_watchdog|_autoshutdown|net-tap"
                 fi
             done
 
@@ -1265,18 +1268,16 @@ clean_sessions() {
         else
             local safe_i="${filter_iface//\//_}"
             local safe_n="${filter_netns//\//_}"
-            local lk_pattern="${STATE_DIR}/.lock_${safe_i}"
-            [[ -n "${safe_n}" ]] && lk_pattern="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
-            for lk in "${lk_pattern}"*; do
-                [[ -f "${lk}" ]] || continue
-                [[ -L "${lk}" ]] && continue
+            local lk="${STATE_DIR}/.lock_${safe_i}"
+            [[ -n "${safe_n}" ]] && lk="${STATE_DIR}/.lock_${safe_n}__${safe_i}"
+            if [[ -f "${lk}" && ! -L "${lk}" ]]; then
                 if (
                     exec 9>>"${lk}"
                     flock -x -n 9 && rm -f "${lk}"
                 ) 2>/dev/null; then
                     cleaned_locks=$((cleaned_locks + 1))
                 fi
-            done
+            fi
         fi
     fi
 

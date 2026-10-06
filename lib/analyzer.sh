@@ -158,6 +158,7 @@ if ddm_files:
         "temperature_c": None,
         "voltage_v": None
     }
+    lanes = {}
     for df in ddm_files:
         try:
             with open(df, "r", encoding="utf-8", errors="ignore") as f:
@@ -196,8 +197,46 @@ if ddm_files:
                         ddm_res["voltage_v"] = float(volt_m.group(1))
                     except ValueError:
                         pass
+
+                channel_blocks = re.findall(r"(?:Channel|Lane)\s*(\d+)\s*:(.*?)(?=(?:Channel|Lane)\s*\d+\s*:|\Z)", content, re.S | re.I)
+                if channel_blocks:
+                    for ch_num_str, blk in channel_blocks:
+                        ch_num = int(ch_num_str)
+                        crx_m = re.search(r"(?:Receiver signal average optical power|Optical receive power)[^:]*:\s*[-0-9.]+\s*mW\s*/\s*([-0-9.]+)\s*dBm", blk, re.I) or re.search(r"(?:Receiver signal average optical power|Optical receive power)[^:]*:\s*([-0-9.]+)\s*dBm", blk, re.I)
+                        ctx_m = re.search(r"Laser output power[^:]*:\s*[-0-9.]+\s*mW\s*/\s*([-0-9.]+)\s*dBm", blk, re.I) or re.search(r"Laser output power[^:]*:\s*([-0-9.]+)\s*dBm", blk, re.I)
+                        cbias_m = re.search(r"Laser bias current[^:]*:\s*([-0-9.]+)\s*mA", blk, re.I)
+                        lanes[ch_num] = {
+                            "lane": ch_num,
+                            "rx_power_dbm": float(crx_m.group(1)) if crx_m else None,
+                            "tx_power_dbm": float(ctx_m.group(1)) if ctx_m else None,
+                            "tx_bias_ma": float(cbias_m.group(1)) if cbias_m else None
+                        }
+                for m in re.finditer(r"(?:Rx|Receiver)\s*(?:power|optical)\s*(?:lane|channel)\s*(\d+)[^:]*:\s*(?:[-0-9.]+\s*mW\s*/\s*)?([-0-9.]+)\s*dBm", content, re.I):
+                    ch = int(m.group(1))
+                    if ch not in lanes: lanes[ch] = {"lane": ch, "rx_power_dbm": None, "tx_power_dbm": None, "tx_bias_ma": None}
+                    try: lanes[ch]["rx_power_dbm"] = float(m.group(2))
+                    except ValueError: pass
+                for m in re.finditer(r"(?:Tx|Laser)\s*(?:power|output)\s*(?:lane|channel)\s*(\d+)[^:]*:\s*(?:[-0-9.]+\s*mW\s*/\s*)?([-0-9.]+)\s*dBm", content, re.I):
+                    ch = int(m.group(1))
+                    if ch not in lanes: lanes[ch] = {"lane": ch, "rx_power_dbm": None, "tx_power_dbm": None, "tx_bias_ma": None}
+                    try: lanes[ch]["tx_power_dbm"] = float(m.group(2))
+                    except ValueError: pass
+                for m in re.finditer(r"(?:Tx\s*bias|Laser\s*bias)\s*(?:lane|channel)\s*(\d+)[^:]*:\s*([-0-9.]+)\s*mA", content, re.I):
+                    ch = int(m.group(1))
+                    if ch not in lanes: lanes[ch] = {"lane": ch, "rx_power_dbm": None, "tx_power_dbm": None, "tx_bias_ma": None}
+                    try: lanes[ch]["tx_bias_ma"] = float(m.group(2))
+                    except ValueError: pass
         except Exception:
             pass
+    if lanes:
+        lane_list = [lanes[k] for k in sorted(lanes.keys())]
+        ddm_res["lanes"] = lane_list
+        if ddm_res["rx_power_dbm"] is None and lane_list and lane_list[0]["rx_power_dbm"] is not None:
+            ddm_res["rx_power_dbm"] = lane_list[0]["rx_power_dbm"]
+        if ddm_res["tx_power_dbm"] is None and lane_list and lane_list[0]["tx_power_dbm"] is not None:
+            ddm_res["tx_power_dbm"] = lane_list[0]["tx_power_dbm"]
+        if ddm_res["tx_bias_ma"] is None and lane_list and lane_list[0]["tx_bias_ma"] is not None:
+            ddm_res["tx_bias_ma"] = lane_list[0]["tx_bias_ma"]
     res["optical_ddm"] = ddm_res
 
 with open(out_file, "w", encoding="utf-8") as out_f:
@@ -230,15 +269,18 @@ with open(out_file, "w", encoding="utf-8") as out_f:
     local tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order
     local lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag
     local arp_probe_count arp_garp_count jumbo_count max_frame_len
+    local ndp_spoofed_frames pfcp_count
     read -r qinq_count arp_count ndp_count ndp_ns ndp_na ndp_rs ndp_ra ndp_redirect vxlan_count gtp_u_count gtp_c_count geneve_count gre_count six_in_four_count four_in_six_count srv6_count sctp_count mpls_count isis_count bfd_count pmtud_count ospf_count \
             ipv6_hbh ipv6_routing ipv6_frag ipv6_esp ipv6_ah ipv6_dstopt \
             tcp_syn tcp_synack tcp_rst tcp_fin tcp_psh tcp_urg tcp_zero_win tcp_retrans \
             tcp_mss tcp_wscale tcp_sack_perm tcp_out_of_order \
             lldp_count cdp_count stp_count lacp_count vrrp_count hsrp_count eapol_count dhcp_count ipv4_frag \
-            arp_probe_count arp_garp_count jumbo_count max_frame_len < <(
+            arp_probe_count arp_garp_count jumbo_count max_frame_len ndp_spoofed_frames pfcp_count < <(
         awk '
             /^[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
-                in_qinq=0; in_arp=0; in_ndp=0; in_vxlan=0; in_gtp_u=0; in_gtp_c=0; in_geneve=0; in_gre=0; in_6in4=0; in_4in6=0; in_srv6=0; in_sctp=0; in_mpls=0; in_isis=0; in_bfd=0; in_pmtud=0; in_ospf=0
+                if (is_ndp && cur_hlim >= 0 && cur_hlim != 255) ndp_spoofed++
+                is_ndp=0; cur_hlim=-1
+                in_qinq=0; in_arp=0; in_ndp=0; in_vxlan=0; in_gtp_u=0; in_gtp_c=0; in_geneve=0; in_gre=0; in_6in4=0; in_4in6=0; in_srv6=0; in_sctp=0; in_mpls=0; in_isis=0; in_bfd=0; in_pmtud=0; in_ospf=0; in_pfcp=0
                 in_lldp=0; in_cdp=0; in_stp=0; in_lacp=0; in_vrrp=0; in_hsrp=0; in_eapol=0; in_dhcp=0
                 in_hbh=0; in_rtg=0; in_frag=0; in_esp=0; in_ah=0; in_v4frag=0; in_dstopt=0
                 for (i = 1; i <= NF; i++) {
@@ -247,6 +289,8 @@ with open(out_file, "w", encoding="utf-8") as out_f:
                         if (flen > max_flen) max_flen = flen
                         if (flen > 1518) jumbo++
                         break
+                    } else if ($i == "hlim" && i < NF) {
+                        cur_hlim = $(i+1) + 0
                     }
                 }
             }
@@ -258,14 +302,15 @@ with open(out_file, "w", encoding="utf-8") as out_f:
                     else if (/who-has ([0-9.]+) tell \1/ || (/Reply/ && (/ff:ff:ff:ff:ff:ff/ || /00:00:00:00:00:00/))) arp_garp++
                 }
             }
-            /neighbor solicitation/ { ndp_ns++; if (!in_ndp) { ndp++; in_ndp=1 } }
-            /neighbor advertisement/ { ndp_na++; if (!in_ndp) { ndp++; in_ndp=1 } }
-            /router advertisement/ { ndp_ra++; if (!in_ndp) { ndp++; in_ndp=1 } }
-            /router solicitation/ { ndp_rs++; if (!in_ndp) { ndp++; in_ndp=1 } }
-            /ICMP6, redirect/ { ndp_redirect++; if (!in_ndp) { ndp++; in_ndp=1 } }
+            /neighbor solicitation/ { ndp_ns++; if (!in_ndp) { ndp++; in_ndp=1 }; is_ndp=1 }
+            /neighbor advertisement/ { ndp_na++; if (!in_ndp) { ndp++; in_ndp=1 }; is_ndp=1 }
+            /router advertisement/ { ndp_ra++; if (!in_ndp) { ndp++; in_ndp=1 }; is_ndp=1 }
+            /router solicitation/ { ndp_rs++; if (!in_ndp) { ndp++; in_ndp=1 }; is_ndp=1 }
+            /ICMP6, redirect/ { ndp_redirect++; if (!in_ndp) { ndp++; in_ndp=1 }; is_ndp=1 }
             /(\.|[[:space:]])(4789|8472|4790):|(\.|[[:space:]])(4789|8472|4790) >|VXLAN/ { if (!in_vxlan) { vxlan++; in_vxlan=1 } }
             /(\.|[[:space:]])2152:|(\.|[[:space:]])2152 >|GTP-U|GTPv1-U/ { if (!in_gtp_u) { gtp_u++; in_gtp_u=1 } }
             /(\.|[[:space:]])2123:|(\.|[[:space:]])2123 >|GTP-C|GTPv1-C|GTPv2-C/ { if (!in_gtp_c) { gtp_c++; in_gtp_c=1 } }
+            /(\.|[[:space:]])8805:|(\.|[[:space:]])8805 >|PFCP/ { if (!in_pfcp) { pfcp++; in_pfcp=1 } }
             /(\.|[[:space:]])6081:|(\.|[[:space:]])6081 >|Geneve/ { if (!in_geneve) { geneve++; in_geneve=1 } }
             /GREv|(proto|next-header) GRE \(47\)/ { if (!in_gre) { gre++; in_gre=1 } }
             /proto IPv6 \(41\)|next-header IPv6 \(41\)/ { if (!in_6in4) { six_in_four++; in_6in4=1 } }
@@ -305,22 +350,74 @@ with open(out_file, "w", encoding="utf-8") as out_f:
             /EAPOL/ { if (!in_eapol) { eapol++; in_eapol=1 } }
             /BOOTP\/DHCP|DHCPv6|dhcp6|\.546 >|\.547 >/ { if (!in_dhcp) { dhcp++; in_dhcp=1 } }
             END {
+                if (is_ndp && cur_hlim >= 0 && cur_hlim != 255) ndp_spoofed++
                 print qinq+0, arp+0, ndp+0, ndp_ns+0, ndp_na+0, ndp_rs+0, ndp_ra+0, ndp_redirect+0, vxlan+0, gtp_u+0, gtp_c+0, geneve+0, gre+0, six_in_four+0, four_in_six+0, srv6+0, sctp+0, mpls+0, isis+0, bfd+0, pmtud+0, ospf+0, \
                       ipv6_hbh+0, ipv6_routing+0, ipv6_frag+0, ipv6_esp+0, ipv6_ah+0, ipv6_dstopt+0, \
                       tcp_syn+0, tcp_synack+0, tcp_rst+0, tcp_fin+0, tcp_psh+0, tcp_urg+0, tcp_zero_win+0, tcp_retrans+0, \
                       tcp_mss+0, tcp_wscale+0, tcp_sack_perm+0, tcp_out_of_order+0, \
                       lldp+0, cdp+0, stp+0, lacp+0, vrrp+0, hsrp+0, eapol+0, dhcp+0, v4frag+0, \
-                      arp_probe+0, arp_garp+0, jumbo+0, max_flen+0
+                      arp_probe+0, arp_garp+0, jumbo+0, max_flen+0, ndp_spoofed+0, pfcp+0
             }
         ' "${dump_file}"
     )
 
     echo -e "${C_CYAN}Discovered IEEE 802.1Q VLAN Tags:${C_RESET}"
     local vlan_ids
-    vlan_ids=$(grep -oE "vlan [0-9]+" "${dump_file}" | awk '$2 >= 0 && $2 <= 4095 {print $2}' | sort -nu || true)
+    vlan_ids=$(grep -oE "vlan [0-9]+" "${dump_file}" | awk '$2 >= 1 && $2 <= 4094 {print $2}' | sort -nu || true)
+
+    local qinq_tuples
+    qinq_tuples=$(awk '
+        /vlan [0-9]+/ {
+            n = 0
+            for (i = 1; i <= NF; i++) {
+                if ($i == "vlan" && i < NF) {
+                    v = $(i+1) + 0
+                    if (v >= 1 && v <= 4094) {
+                        vlans[++n] = v
+                    }
+                }
+            }
+            if (n >= 2) {
+                print vlans[1] "," vlans[2]
+            }
+        }
+    ' "${dump_file}" 2>/dev/null | sort -u || true)
+
+    local pcp_distribution
+    pcp_distribution=$(awk '
+        /, p [0-7]/ || /vlan [0-9]+, p [0-7]/ {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "p" && i < NF) {
+                    p = $(i+1) + 0
+                    if (p >= 0 && p <= 7) pcp_counts[p]++
+                }
+            }
+        }
+        END {
+            for (p = 0; p <= 7; p++) {
+                if (pcp_counts[p] > 0) print p, pcp_counts[p]
+            }
+        }
+    ' "${dump_file}" 2>/dev/null | sort -n || true)
     
     if [[ "${qinq_count}" -gt 0 ]]; then
         echo -e "  ${C_CYAN}[FOUND] QinQ Double-Tagging (802.1ad):${C_RESET} ${qinq_count} nested VLAN frame(s) observed."
+        if [[ -n "${qinq_tuples}" ]]; then
+            while IFS= read -r tuple; do
+                [[ -z "${tuple}" ]] && continue
+                local s_vlan c_vlan
+                IFS=',' read -r s_vlan c_vlan <<< "${tuple}"
+                echo -e "    -> QinQ Tag Tuple: S-VLAN ${C_BOLD}${s_vlan}${C_RESET}, C-VLAN ${C_BOLD}${c_vlan}${C_RESET}"
+            done <<< "${qinq_tuples}"
+        fi
+    fi
+
+    if [[ -n "${pcp_distribution}" ]]; then
+        echo -e "  ${C_CYAN}Discovered IEEE 802.1p Priority (PCP / CoS) Distribution:${C_RESET}"
+        while read -r cos_id cos_cnt; do
+            [[ -z "${cos_id}" ]] && continue
+            echo -e "    -> CoS ${cos_id} : ${cos_cnt} frame(s)"
+        done <<< "${pcp_distribution}"
     fi
 
     if [[ "${jumbo_count}" -gt 0 ]]; then
@@ -395,6 +492,8 @@ with open(out_file, "w", encoding="utf-8") as out_f:
     # Filter multicast (224.0.0.0/4), loopback (127/8), APIPA (169.254/16), broadcast (255.255.255.255), 0.0.0.0/8
     grep -vE '(^(22[4-9]|23[0-9])\.|^255\.255\.255\.255$|^0\.|^127\.|^169\.254\.)' \
         "${TEMP_DIR}/observed_ipv4.txt" | sort -u > "${TEMP_DIR}/clean_ipv4.txt" || true
+    # Retain IPv4 multicast addresses (224.0.0.0/4)
+    grep -E '^(22[4-9]|23[0-9])\.' "${TEMP_DIR}/observed_ipv4.txt" | sort -u > "${TEMP_DIR}/observed_ipv4_mcast.txt" || true
 
     local ip_count
     ip_count=$(wc -l < "${TEMP_DIR}/clean_ipv4.txt")
@@ -465,6 +564,28 @@ with open(out_file, "w", encoding="utf-8") as out_f:
         fi
     else
         echo "  No IPv4 addresses identified from traffic."
+    fi
+
+    local observed_v4_mcast
+    observed_v4_mcast=$(cat "${TEMP_DIR}/observed_ipv4_mcast.txt" 2>/dev/null || true)
+    if [[ -n "${observed_v4_mcast}" ]]; then
+        echo -e "\n${C_CYAN}Active IPv4 Multicast Groups Observed:${C_RESET}"
+        while IFS= read -r mcast_grp; do
+            [[ -z "${mcast_grp}" ]] && continue
+            local desc=""
+            case "${mcast_grp}" in
+                224.0.0.1) desc=" (All Systems / All Hosts - RFC 1112)" ;;
+                224.0.0.2) desc=" (All Routers - RFC 1112)" ;;
+                224.0.0.5) desc=" (OSPF All Routers - RFC 2328)" ;;
+                224.0.0.6) desc=" (OSPF Designated Routers - RFC 2328)" ;;
+                224.0.0.18) desc=" (VRRP - RFC 3768 / RFC 5798)" ;;
+                224.0.0.22) desc=" (IGMPv3 Membership Reports - RFC 3376)" ;;
+                224.0.0.251) desc=" (mDNS - RFC 6762)" ;;
+                224.0.0.252) desc=" (LLMNR - RFC 4795)" ;;
+                239.*) desc=" (Administratively Scoped / Private - RFC 2365)" ;;
+            esac
+            echo -e "  -> ${C_BOLD}${mcast_grp}${C_RESET}${desc}"
+        done <<< "${observed_v4_mcast}"
     fi
 
     # Inferred Default Gateways
@@ -681,6 +802,9 @@ for line in sys.stdin:
     fi
     echo -e "  IPv4 ARP Resolution Frames  : ${arp_count}${arp_detail}"
     echo -e "  IPv6 NDP Resolution Frames  : ${ndp_count} (NS: ${ndp_ns:-0}, NA: ${ndp_na:-0}, RS: ${ndp_rs:-0}, RA: ${ndp_ra:-0}, Redirect: ${ndp_redirect:-0})"
+    if [[ ${ndp_spoofed_frames:-0} -gt 0 ]]; then
+        echo -e "  ${C_RED}${C_BOLD}[ALERT] NDP Hop Limit Violation (RFC 4861):${C_RESET} ${ndp_spoofed_frames} frame(s) observed with hop limit != 255 (Potential off-link spoofing / injection attack)!"
+    fi
 
     # Overlay Networks & Tunnels
     echo -e "\n${C_CYAN}Network Tunnels & Overlay Encapsulation:${C_RESET}"
@@ -697,6 +821,10 @@ for line in sys.stdin:
         echo -e "  ${C_RED}[ALERT] GTP-C Mobile Control Plane Tunnels:${C_RESET} ${gtp_c_count} UDP/2123 packet(s)."
         tunnels_found=1
     fi
+    if [[ "${pfcp_count}" -gt 0 ]]; then
+        echo -e "  ${C_RED}[ALERT] 5G SA N4 PFCP Signaling:${C_RESET} ${pfcp_count} UDP/8805 packet(s)."
+        tunnels_found=1
+    fi
     if [[ "${geneve_count}" -gt 0 ]]; then
         echo -e "  ${C_RED}[ALERT] Geneve Overlay Tunnels:${C_RESET} ${geneve_count} UDP/6081 packet(s)."
         tunnels_found=1
@@ -705,8 +833,36 @@ for line in sys.stdin:
         echo -e "  ${C_RED}[ALERT] GRE Tunnels Detected:${C_RESET} ${gre_count} IP/47 encapsulation packet(s)."
         tunnels_found=1
     fi
+    local mpls_max_depth=0
+    mpls_max_depth=$(awk '
+        /^[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
+            if (cur_depth > max_d) max_d = cur_depth
+            cur_depth = 0
+        }
+        /label [0-9]+/ {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /label/ && i < NF) {
+                    lbl = $(i+1) + 0
+                    if (lbl > 0) cur_depth++
+                }
+            }
+        }
+        END {
+            if (cur_depth > max_d) max_d = cur_depth
+            print max_d + 0
+        }
+    ' "${dump_file}" 2>/dev/null || echo "0")
+    local mpls_labels
+    mpls_labels=$(grep -oE "label [0-9]+" "${dump_file}" 2>/dev/null | awk '{print $2}' | sort -nu || true)
+
     if [[ "${mpls_count}" -gt 0 ]]; then
-        echo -e "  ${C_RED}[ALERT] MPLS Transport Labeling:${C_RESET} ${mpls_count} frame(s) observed."
+        echo -e "  ${C_RED}[ALERT] MPLS Transport Labeling:${C_RESET} ${mpls_count} frame(s) observed (Max Label Stack Depth: ${mpls_max_depth})."
+        if [[ -n "${mpls_labels}" ]]; then
+            while IFS= read -r lbl; do
+                [[ -z "${lbl}" ]] && continue
+                echo -e "    -> Discovered MPLS Label : ${C_BOLD}${lbl}${C_RESET}"
+            done <<< "${mpls_labels}"
+        fi
         tunnels_found=1
     fi
     if [[ "${six_in_four_count}" -gt 0 ]]; then
@@ -959,6 +1115,8 @@ except Exception:
         echo -e "  [PASS] IEEE 802.1X (EAPOL): No EAPOL identity requests observed."
     fi
 
+    local dhcpv6_types="" dhcpv6_duids="" dhcpv6_prefixes="" dhcpv6_dns=""
+
     # DHCP Snooping / DHCP Analysis
     if [[ "${dhcp_count}" -gt 0 ]]; then
         echo -e "  ${C_CYAN}DHCP Infrastructure Active:${C_RESET} ${dhcp_count} DHCP broadcast/relay packets observed."
@@ -968,6 +1126,10 @@ except Exception:
         dhcp_leases=$(grep -oE "Lease-Time \([0-9]+\), length [0-9]+: [0-9a-zA-Z]+" "${dump_file}" 2>/dev/null | awk '{print $NF}' | sort -u || true)
         dhcp_dns_servers=$(grep -oE "Domain-Name-Server \([0-9]+\), length [0-9]+: [0-9\., ]+" "${dump_file}" 2>/dev/null | sed -E 's/.*: //' | tr ',' '\n' | sort -u || true)
         dhcp_domains=$(sed -nE 's/.*Domain-Name \([0-9]+\), length [0-9]+: "([^"]+)".*/\1/p' "${dump_file}" 2>/dev/null | sort -u || true)
+
+        dhcpv6_types=$(grep -oE "dhcp6 (solicit|advertise|request|reply|renew|rebind|release|decline|info-req)" "${dump_file}" 2>/dev/null | awk '{print $2}' | sort -u || true)
+        dhcpv6_duids=$(sed -nE 's/.*(client-ID|server-ID) hwaddr\/time type [0-9]+ time [0-9]+ ([0-9a-fA-F]+).*/\2/p; s/.*(client-ID|server-ID) [a-zA-Z0-9/]+ ([0-9a-fA-F]{12,}).*/\2/p' "${dump_file}" 2>/dev/null | sort -u || true)
+        dhcpv6_dns=$(grep -i "rdnss option" "${dump_file}" 2>/dev/null | sed -nE 's/.*addr:[[:space:]]*([0-9a-fA-F:]+).*/\1/p' | sort -u || true)
 
         if [[ -n "${dhcp_types}" ]]; then
             echo -e "    -> DHCPv4 Message Types (Opt 53)      : $(echo "${dhcp_types}" | paste -sd, -)"
@@ -983,6 +1145,15 @@ except Exception:
         fi
         if [[ -n "${dhcp_domains}" ]]; then
             echo -e "    -> DHCPv4 Domain Names (Opt 15)       : $(echo "${dhcp_domains}" | paste -sd, -)"
+        fi
+        if [[ -n "${dhcpv6_types}" ]]; then
+            echo -e "    -> DHCPv6 Message Types               : $(echo "${dhcpv6_types}" | paste -sd, -)"
+        fi
+        if [[ -n "${dhcpv6_duids}" ]]; then
+            echo -e "    -> DHCPv6 Client/Server DUIDs         : $(echo "${dhcpv6_duids}" | paste -sd, -)"
+        fi
+        if [[ -n "${dhcpv6_dns}" ]]; then
+            echo -e "    -> DHCPv6 DNS Servers (Opt 23)        : $(echo "${dhcpv6_dns}" | paste -sd, -)"
         fi
     else
         echo "  [ -- ] DHCP: No DHCP Discover/Offer packets observed."
@@ -1005,7 +1176,7 @@ except Exception:
     # =========================================================================
     # 6. DEEP PROTOCOL INSPECTION (L4-L7)
     # =========================================================================
-    local snmp_strings="" ospf_routers="" bgp_asns="" dhcp_hosts="" dns_names="" tls_sni=""
+    local snmp_strings="" ospf_routers="" bgp_asns="" dhcp_hosts="" dns_names="" tls_sni="" gtp_teids=""
 
     if [[ "${NET_TAP_DISABLE_TSHARK:-0}" -ne 1 ]] && command -v tshark >/dev/null 2>&1; then
         echo -e "\n${C_BOLD}======================================================================${C_RESET}"
@@ -1026,7 +1197,15 @@ except Exception:
                 -e dhcp.fqdn.name \
                 -e dns.qry.name \
                 -e tls.handshake.extensions_server_name \
-                -e tcp.analysis.retransmission 2>/dev/null >> "${tshark_dump}" || true
+                -e tcp.analysis.retransmission \
+                -e gtp.teid \
+                -e gtp.teid_data \
+                -e gtp.teid_cp \
+                -e dhcpv6.msgtype \
+                -e dhcpv6.duid.bytes \
+                -e dhcpv6.iaaddr.ip \
+                -e dhcpv6.iaprefix.pref_addr \
+                -e dhcpv6.dns_server 2>/dev/null >> "${tshark_dump}" || true
         done
 
         local tshark_retrans=0
@@ -1079,6 +1258,32 @@ except Exception:
         if [[ -n "${tls_sni}" ]]; then
             echo -e "\n${C_CYAN}Top TLS SNI Destinations:${C_RESET}"
             echo "${tls_sni}" | sed 's/^/  -> /'
+        fi
+
+        # GTP TEID Sessions
+        gtp_teids=$(awk -F'\t' '{if ($12 != "" || $13 != "" || $14 != "") print $12 "\n" $13 "\n" $14}' "${tshark_dump}" 2>/dev/null | tr ',' '\n' | grep -v '^$' | sort -u || true)
+        if [[ -n "${gtp_teids}" ]]; then
+            echo -e "\n${C_GREEN}Active GTP TEID Sessions:${C_RESET}"
+            echo "${gtp_teids}" | sed 's/^/  -> TEID /'
+        fi
+
+        # Enrich DHCPv6 from tshark if present
+        local tshark_v6_types tshark_v6_duids tshark_v6_dns tshark_v6_ia_pd
+        tshark_v6_types=$(awk -F'\t' '{if ($15 != "") print $15}' "${tshark_dump}" 2>/dev/null | tr ',' '\n' | grep -v '^$' | sort -u || true)
+        tshark_v6_duids=$(awk -F'\t' '{if ($16 != "") print $16}' "${tshark_dump}" 2>/dev/null | tr ',' '\n' | grep -v '^$' | sort -u || true)
+        tshark_v6_ia_pd=$(awk -F'\t' '{if ($18 != "") print $18}' "${tshark_dump}" 2>/dev/null | tr ',' '\n' | grep -v '^$' | sort -u || true)
+        tshark_v6_dns=$(awk -F'\t' '{if ($19 != "") print $19}' "${tshark_dump}" 2>/dev/null | tr ',' '\n' | grep -v '^$' | sort -u || true)
+        if [[ -n "${tshark_v6_types}" ]]; then
+            dhcpv6_types=$(printf "%s\n%s\n" "${dhcpv6_types}" "${tshark_v6_types}" | grep -v '^$' | sort -u || true)
+        fi
+        if [[ -n "${tshark_v6_duids}" ]]; then
+            dhcpv6_duids=$(printf "%s\n%s\n" "${dhcpv6_duids}" "${tshark_v6_duids}" | grep -v '^$' | sort -u || true)
+        fi
+        if [[ -n "${tshark_v6_dns}" ]]; then
+            dhcpv6_dns=$(printf "%s\n%s\n" "${dhcpv6_dns}" "${tshark_v6_dns}" | grep -v '^$' | sort -u || true)
+        fi
+        if [[ -n "${tshark_v6_ia_pd}" ]]; then
+            dhcpv6_prefixes=$(printf "%s\n%s\n" "${dhcpv6_prefixes}" "${tshark_v6_ia_pd}" | grep -v '^$' | sort -u || true)
         fi
         
     else
@@ -1473,57 +1678,39 @@ except Exception:
     if [[ "${JSON_OUT}" == "1" ]]; then
         exec 1>&3
         exec 3>&-
-        
-        local raw_ipv4; raw_ipv4=$(cat "${TEMP_DIR}/clean_ipv4.txt" 2>/dev/null || true)
-        local raw_ipv6; raw_ipv6=$(cat "${TEMP_DIR}/clean_ipv6.txt" 2>/dev/null || true)
-        
-        to_jarr() {
-            local input="$1"
-            local max_len="${2:-0}"
-            if [[ -z "${input//[[:space:]]/}" ]]; then
-                echo "[]"
-                return
-            fi
-            local clean_input
-            clean_input=$(printf "%s" "${input}" | tr -d '\001-\010\013\014\016-\037\177')
-            local out="[" first=1 item
-            while IFS= read -r item; do
-                [[ -z "${item}" ]] && continue
-                if [[ "${max_len}" -gt 0 && ${#item} -gt "${max_len}" ]]; then
-                    item="${item:0:${max_len}}"
-                fi
-                # Escape backslash and double quote
-                item="${item//\\/\\\\}"
-                item="${item//\"/\\\"}"
-                # Escape RFC 8259 required control characters
-                item="${item//$'\t'/\\t}"
-                item="${item//$'\r'/\\r}"
-                item="${item//$'\n'/\\n}"
-                if [[ ${first} -eq 1 ]]; then
-                    out+="\"${item}\""
-                    first=0
-                else
-                    out+=", \"${item}\""
-                fi
-            done <<< "${clean_input}"
-            out+="]"
-            echo "${out}"
-        }
 
-        cat <<EOF
+        # Write intermediate lists to TEMP_DIR for safe structured assembly
+        printf "%s\n" "${vlan_ids:-}" > "${TEMP_DIR}/vlans.txt"
+        printf "%s\n" "${qinq_tuples:-}" > "${TEMP_DIR}/qinq_tuples.txt"
+        printf "%s\n" "${unicast_macs:-}" > "${TEMP_DIR}/unicast_macs.txt"
+        printf "%s\n" "${gateways:-}" > "${TEMP_DIR}/gateways.txt"
+        printf "%s\n" "${ipv6_prefixes:-}" > "${TEMP_DIR}/ipv6_prefixes.txt"
+        printf "%s\n" "${ipv6_ras:-}" > "${TEMP_DIR}/ipv6_ras.txt"
+        printf "%s\n" "${observed_mcast:-}" > "${TEMP_DIR}/ipv6_mcast.txt"
+        printf "%s\n" "${discovered_mtus:-}" > "${TEMP_DIR}/discovered_mtus.txt"
+        printf "%s\n" "${mpls_labels:-}" > "${TEMP_DIR}/mpls_labels.txt"
+        printf "%s\n" "${gtp_teids:-}" > "${TEMP_DIR}/gtp_teids.txt"
+        printf "%s\n" "${dhcpv6_types:-}" > "${TEMP_DIR}/dhcpv6_types.txt"
+        printf "%s\n" "${dhcpv6_duids:-}" > "${TEMP_DIR}/dhcpv6_duids.txt"
+        printf "%s\n" "${dhcpv6_prefixes:-}" > "${TEMP_DIR}/dhcpv6_prefixes.txt"
+        printf "%s\n" "${dhcpv6_dns:-}" > "${TEMP_DIR}/dhcpv6_dns.txt"
+        printf "%s\n" "${snmp_strings:-}" > "${TEMP_DIR}/snmp_strings.txt"
+        printf "%s\n" "${ospf_routers:-}" > "${TEMP_DIR}/ospf_routers.txt"
+        printf "%s\n" "${bgp_asns:-}" > "${TEMP_DIR}/bgp_asns.txt"
+        printf "%s\n" "${dhcp_hosts:-}" > "${TEMP_DIR}/dhcp_hosts.txt"
+        printf "%s\n" "${dns_names:-}" > "${TEMP_DIR}/dns_names.txt"
+        printf "%s\n" "${tls_sni:-}" > "${TEMP_DIR}/tls_sni.txt"
+        printf "%s\n" "${pcp_distribution:-}" > "${TEMP_DIR}/pcp_distribution.txt"
+
+        local counts_json
+        counts_json=$(cat <<CJSON
 {
-  "schema_version": "1.0.0",
-  "vlans": $(to_jarr "$vlan_ids"),
   "qinq_frames": ${qinq_count:-0},
-  "mac_addresses": $(to_jarr "$unicast_macs"),
-  "ipv4_addresses": $(to_jarr "$raw_ipv4"),
-  "ipv4_gateways": $(to_jarr "$gateways"),
-  "ipv6_addresses": $(to_jarr "$raw_ipv6"),
-  "ipv6_prefixes": $(to_jarr "$ipv6_prefixes"),
-  "ipv6_routers": $(to_jarr "$ipv6_ras"),
+  "mpls_max_stack_depth": ${mpls_max_depth:-0},
   "resolution": {
     "arp_frames": ${arp_count:-0},
     "ndp_frames": ${ndp_count:-0},
+    "ndp_spoofed_frames": ${ndp_spoofed_frames:-0},
     "ndp_details": {
       "neighbor_solicitation": ${ndp_ns:-0},
       "neighbor_advertisement": ${ndp_na:-0},
@@ -1536,6 +1723,7 @@ except Exception:
     "vxlan": ${vxlan_count:-0},
     "gtp_u": ${gtp_u_count:-0},
     "gtp_c": ${gtp_c_count:-0},
+    "pfcp": ${pfcp_count:-0},
     "geneve": ${geneve_count:-0},
     "gre": ${gre_count:-0},
     "mpls": ${mpls_count:-0},
@@ -1546,7 +1734,6 @@ except Exception:
   "protocols": {
     "sctp": ${sctp_count:-0},
     "pmtud": ${pmtud_count:-0},
-    "next_hop_mtus": $(to_jarr "$discovered_mtus"),
     "ipv6_extension_headers": {
       "hop_by_hop": ${ipv6_hbh:-0},
       "routing": ${ipv6_routing:-0},
@@ -1585,18 +1772,116 @@ except Exception:
   "security_frames": {
     "eapol": ${eapol_count:-0},
     "dhcp": ${dhcp_count:-0}
-  },
-  "dpi": {
-    "snmp_community_strings": $(to_jarr "$snmp_strings" 256),
-    "ospf_routers": $(to_jarr "$ospf_routers"),
-    "bgp_asns": $(to_jarr "$bgp_asns"),
-    "dhcp_hostnames": $(to_jarr "$dhcp_hosts" 253),
-    "dns_queries": $(to_jarr "$dns_names" 253),
-    "tls_sni": $(to_jarr "$tls_sni" 253)
-  },
-  "top_talkers": $(if [[ -s "${TEMP_DIR}/top_talkers.json" ]]; then cat "${TEMP_DIR}/top_talkers.json"; else echo '{"ipv4":[],"ipv6":[],"flows":[]}'; fi)$(if [[ -s "${TEMP_DIR}/physical_layer.json" ]]; then echo "  , \"physical_layer\": "; cat "${TEMP_DIR}/physical_layer.json"; fi)$(if [[ -s "${TEMP_DIR}/active_audit.json" ]]; then echo "  , \"active_audit\": "; cat "${TEMP_DIR}/active_audit.json"; fi)
+  }
 }
-EOF
+CJSON
+)
+
+        python3 -B -c '
+import os, sys, json
+
+temp_dir = sys.argv[1]
+counts = json.loads(sys.argv[2])
+
+def read_lines(fname, max_len=None):
+    p = os.path.join(temp_dir, fname)
+    if not os.path.exists(p):
+        return []
+    res = []
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if max_len and len(line) > max_len:
+                line = line[:max_len]
+            if line not in res:
+                res.append(line)
+    return res
+
+def read_json(fname, default=None):
+    p = os.path.join(temp_dir, fname)
+    if not os.path.exists(p):
+        return default
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+pcp_dist = {}
+pcp_file = os.path.join(temp_dir, "pcp_distribution.txt")
+if os.path.exists(pcp_file):
+    try:
+        with open(pcp_file) as pf:
+            for line in pf:
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    pcp_dist[str(parts[0])] = int(parts[1])
+    except Exception:
+        pass
+
+report = {
+    "schema_version": "1.0.0",
+    "vlans": read_lines("vlans.txt"),
+    "qinq_frames": counts["qinq_frames"],
+    "qinq_tuples": read_lines("qinq_tuples.txt"),
+    "mpls_labels": read_lines("mpls_labels.txt"),
+    "mpls_max_stack_depth": counts.get("mpls_max_stack_depth", 0),
+    "mobile_core": {
+        "gtp_u": counts["tunnels"]["gtp_u"],
+        "gtp_c": counts["tunnels"]["gtp_c"],
+        "pfcp": counts["tunnels"]["pfcp"],
+        "active_teids": read_lines("gtp_teids.txt")
+    },
+    "dhcpv6": {
+        "message_types": read_lines("dhcpv6_types.txt"),
+        "server_duids": read_lines("dhcpv6_duids.txt"),
+        "ia_na_addresses": [],
+        "ia_pd_prefixes": read_lines("dhcpv6_prefixes.txt"),
+        "dns_servers": read_lines("dhcpv6_dns.txt")
+    },
+    "mac_addresses": read_lines("unicast_macs.txt"),
+    "ipv4_addresses": read_lines("clean_ipv4.txt"),
+    "ipv4_gateways": read_lines("gateways.txt"),
+    "ipv4_multicast_groups": read_lines("observed_ipv4_mcast.txt"),
+    "ipv6_addresses": read_lines("clean_ipv6.txt"),
+    "ipv6_prefixes": read_lines("ipv6_prefixes.txt"),
+    "ipv6_routers": read_lines("ipv6_ras.txt"),
+    "ipv6_multicast_groups": read_lines("ipv6_mcast.txt"),
+    "resolution": counts["resolution"],
+    "tunnels": counts["tunnels"],
+    "protocols": {
+        **counts["protocols"],
+        "next_hop_mtus": read_lines("discovered_mtus.txt"),
+        "pcp_cos_distribution": pcp_dist
+    },
+    "infrastructure_frames": counts["infrastructure_frames"],
+    "security_frames": counts["security_frames"],
+    "dpi": {
+        "snmp_community_strings": read_lines("snmp_strings.txt", 256),
+        "ospf_routers": read_lines("ospf_routers.txt"),
+        "bgp_asns": read_lines("bgp_asns.txt"),
+        "dhcp_hostnames": read_lines("dhcp_hosts.txt", 253),
+        "dns_queries": read_lines("dns_names.txt", 253),
+        "tls_sni": read_lines("tls_sni.txt", 253),
+        "dhcpv6_duids": read_lines("dhcpv6_duids.txt", 256),
+        "dhcpv6_ia_pd_prefixes": read_lines("dhcpv6_prefixes.txt", 256),
+        "dhcpv6_dns_servers": read_lines("dhcpv6_dns.txt", 256)
+    },
+    "top_talkers": read_json("top_talkers.json", {"ipv4": [], "ipv6": [], "flows": []})
+}
+
+phys = read_json("physical_layer.json")
+if phys:
+    report["physical_layer"] = phys
+
+audit = read_json("active_audit.json")
+if audit:
+    report["active_audit"] = audit
+
+print(json.dumps(report, indent=2))
+' "${TEMP_DIR}" "${counts_json}"
     fi
     cleanup_analyzer
     trap - EXIT INT TERM HUP

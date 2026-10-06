@@ -21,6 +21,7 @@ run_probe() {
         exit 1
     fi
 
+    STATE_DIR="${STATE_DIR:-/var/run/net-tap}"
     local safe_iface="${IFACE//\//_}"
     local raw_netns="${NETNS:-}"
     local safe_netns="${raw_netns//\//_}"
@@ -108,10 +109,11 @@ run_probe() {
     [[ -n "${PROBE_PCP:-}" ]] && cmd+=(--pcp "${PROBE_PCP}")
     [[ -n "${PROBE_DEI:-}" ]] && cmd+=(--dei "${PROBE_DEI}")
     [[ -n "${PROBE_QINQ_TPID:-}" ]] && cmd+=(--qinq-tpid "${PROBE_QINQ_TPID}")
+    [[ -n "${PROBE_FALLBACK_MAC_MODE:-}" ]] && cmd+=(--fallback-mac-mode "${PROBE_FALLBACK_MAC_MODE}")
 
     log_info "Launching ${PROBE_TYPE^^} probe on ${IFACE} (rate: ${PROBE_RATE:-50} pps)..."
-    cmd_netns "${cmd[@]}"
-    local probe_rc=$?
+    local probe_rc=0
+    cmd_netns "${cmd[@]}" || probe_rc=$?
     trap - EXIT INT TERM
     release_lock
     if [[ ${probe_rc} -ne 0 ]]; then

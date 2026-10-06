@@ -39,7 +39,9 @@ jumbo_payload = b"\xaa" * 8900
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / Dot1Q(vlan=500) / IP(src="10.50.0.1", dst="10.50.0.2") / UDP(sport=9999, dport=9999) / Raw(load=jumbo_payload))
 
 # 1c. Provider Backbone Bridge (802.1ah / Mac-in-Mac - 0x88e7)
-packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x88e7) / Raw(load=b"\x00\x04\x00\x00\x00\x01\x02\x00\x00\x00\x00\x03\x02\x00\x00\x00\x00\x04\x08\x00") / IP(src="10.80.0.1", dst="10.80.0.2") / UDP(sport=8000, dport=8000))
+# I-TAG (4B): I-SID 0x040000, C-DA (6B), C-SA (6B), EtherType IPv4 (0x0800)
+pbb_payload = b"\x00\x04\x00\x00\x00\x01\x02\x00\x00\x00\x00\x03\x02\x00\x00\x00\x08\x00"
+packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x88e7) / Raw(load=pbb_payload) / IP(src="10.80.0.1", dst="10.80.0.2") / UDP(sport=8000, dport=8000))
 
 # 1d. MTU Boundary Frames (Runt <64B, 1514B Ethernet MTU, 1518B 802.1Q MTU, 9216B Jumbo Envelope)
 packets.append(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02", type=0x1234) / Raw(load=b"\x00"*20))
@@ -67,11 +69,12 @@ packets.append(Ether(src="02:00:00:00:00:aa", dst="01:80:c2:00:00:03", type=0x88
 
 # 5b. Ethernet OAM CFM CCM (IEEE 802.1ag / ITU-T Y.1731 - EtherType 0x8902)
 # CCM PDU: Level 4, OpCode 1 (CCM), Flags 4 (1s interval), First TLV Offset 70
+# MAID: MD Name Format 4 (Char string "corp", len 4), Short MA Name Format 2 (Char string "carrier1", len 8), padding (33B)
 cfm_ccm = (
     b"\x80\x01\x04\x46" +
     b"\x00\x00\x00\x01" +
     b"\x00\x01" +
-    b"\x01\x04corp\x02\x08carrier1" + b"\x00" * 32 +
+    b"\x04\x04corp\x02\x08carrier1" + b"\x00" * 33 +
     b"\x00" * 16 +
     b"\x00"
 )

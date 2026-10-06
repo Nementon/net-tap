@@ -29,7 +29,7 @@ import struct
 import subprocess
 import sys
 import time
-from typing import Optional, List, Tuple, Dict, Any, TextIO
+from typing import Optional, List, Tuple, Dict, Any, Sequence
 
 try:
     from scapy.all import (
@@ -183,10 +183,11 @@ def resolve_source_ipv6(iface: str, target_ip: str = "", explicit_src: Optional[
 def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                     src_mac: Optional[str] = None, src_ip: Optional[str] = None,
                     vlan: Optional[int] = None, qinq: Optional[Tuple[int, int]] = None,
-                    pcp: int = 0, dei: int = 0, qinq_tpid: int = 0x88a8) -> str:
+                    pcp: int = 0, dei: int = 0, qinq_tpid: int = 0x88a8,
+                    fallback_mode: str = "multicast") -> str:
     """Resolve destination MAC for target IP using neighbor cache with active pre-flight ARP/NDP fallback."""
     clean_target = target_ip.split("%")[0].strip() if target_ip else ""
-    cache_key = (iface, clean_target, is_v6, vlan, qinq, pcp, dei, qinq_tpid)
+    cache_key = (iface, clean_target, is_v6, vlan, qinq, pcp, dei, qinq_tpid, fallback_mode)
     if cache_key in MAC_RESOLUTION_CACHE:
         return MAC_RESOLUTION_CACHE[cache_key]
 
@@ -269,8 +270,10 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                 except Exception:
                     pass
 
-            # Fall back to broadcast MAC (ff:ff:ff:ff:ff:ff) for failed unicast resolution (RFC 4291 compliant)
-            return "ff:ff:ff:ff:ff:ff"
+            # Fall back to RFC 2464 all-nodes multicast (33:33:00:00:00:01) or broadcast (ff:ff:ff:ff:ff:ff)
+            fallback = "ff:ff:ff:ff:ff:ff" if fallback_mode == "broadcast" else "33:33:00:00:00:01"
+            MAC_RESOLUTION_CACHE[cache_key] = fallback
+            return fallback
 
         elif not is_v6 and isinstance(tgt_obj, ipaddress.IPv4Address):
             if os.path.exists("/proc/net/arp"):
@@ -321,11 +324,15 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
                 except Exception:
                     pass
 
-            return "ff:ff:ff:ff:ff:ff"
+            fallback = "ff:ff:ff:ff:ff:ff"
+            MAC_RESOLUTION_CACHE[cache_key] = fallback
+            return fallback
         else:
-            return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
+            fallback = "ff:ff:ff:ff:ff:ff" if (not is_v6 or fallback_mode == "broadcast") else "33:33:00:00:00:01"
+            MAC_RESOLUTION_CACHE[cache_key] = fallback
+            return fallback
     except Exception:
-        return "33:33:00:00:00:01" if is_v6 else "ff:ff:ff:ff:ff:ff"
+        return "ff:ff:ff:ff:ff:ff" if (not is_v6 or fallback_mode == "broadcast") else "33:33:00:00:00:01"
 
 
 def wrap_l2(payload: Any, dst_mac: str, src_mac: str,
@@ -383,6 +390,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pcp", type=int, default=0, choices=range(0, 8), help="802.1p Priority Code Point (0-7)")
     parser.add_argument("--dei", type=int, default=0, choices=[0, 1], help="802.1Q Drop Eligible Indicator (0 or 1)")
     parser.add_argument("--qinq-tpid", default="0x88a8", help="Outer QinQ TPID (0x88a8, 0x8100, 0x9100, 0x9200)")
+    parser.add_argument("--fallback-mac-mode", default="multicast", choices=["multicast", "broadcast"],
+                        help="Fallback MAC mode for unresolved unicast targets (default: multicast)")
     return parser.parse_args()
 
 
@@ -457,7 +466,7 @@ def main() -> None:
         qinq_tpid = 0x88a8
 
     # Parse VLAN configurations
-    vlan_list = []
+    vlan_list: Sequence[Optional[int]] = []
     spec = args.vlans if args.vlans else (str(args.vlan) if args.vlan is not None else "")
     if spec:
         try:
@@ -480,27 +489,30 @@ def main() -> None:
             sys.stderr.write("ERROR: Malformed --qinq value. Expected 's_tag,c_tag' (e.g. 100,200).\n")
             sys.exit(1)
 
-    # Prepare audit log
-    audit_path = os.path.abspath(args.audit_file)
-    os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+    sock = None
+    audit_f = None
     try:
-        audit_fd = os.open(
-            audit_path,
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
-            0o600
-        )
-    except OSError as err:
-        sys.stderr.write(f"ERROR: Cannot securely open audit log '{audit_path}': {err}\n")
-        sys.exit(1)
-    audit_f = open(audit_fd, "a", encoding="utf-8", buffering=1)
+        # Prepare audit log
+        audit_path = os.path.abspath(args.audit_file)
+        try:
+            os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+            audit_fd = os.open(
+                audit_path,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+                0o600
+            )
+        except OSError as err:
+            sys.stderr.write(f"ERROR: Cannot securely open audit log '{audit_path}': {err}\n")
+            sys.exit(1)
+        audit_f = open(audit_fd, "a", encoding="utf-8", buffering=1)
 
-    sock = create_probe_socket(iface)
-    pacing_interval = 1.0 / max(1, args.rate)
-    packet_count = 0
-    seq = 0
-    deadline = time.monotonic() + max(1, args.timeout)
+        sock = create_probe_socket(iface)
+        fallback_mode = getattr(args, "fallback_mac_mode", "multicast")
+        pacing_interval = 1.0 / max(1, args.rate)
+        packet_count = 0
+        seq = 0
+        deadline = time.monotonic() + max(1, args.timeout)
 
-    try:
         for vid in vlan_list:
             if time.monotonic() > deadline:
                 break
@@ -534,8 +546,6 @@ def main() -> None:
                         break
                     log_audit(audit_f, audit_id, "arp", str(host), vid, args.qinq, src_mac, "ff:ff:ff:ff:ff:ff", seq)
                     packet_count += 1
-                    if packet_count % 50 == 0:
-                        audit_f.flush()
                     time.sleep(pacing_interval)
 
             elif args.type == "ndp":
@@ -674,7 +684,7 @@ def main() -> None:
                         sys.exit(1)
                     sizes = [1280, 1420, 1450, 1492, 1500, 2000, 4000, 9000]
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
                 else:
                     target_ip = clean_target or "192.168.1.1"
                     try:
@@ -684,7 +694,7 @@ def main() -> None:
                         sys.exit(1)
                     sizes = [576, 1280, 1420, 1450, 1492, 1500, 2000, 4000, 9000]
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
 
                 for sz in sizes:
                     if time.monotonic() > deadline:
@@ -725,12 +735,19 @@ def main() -> None:
                     sys.exit(1)
                 if is_v6:
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
                 else:
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
 
-                raw_ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
+                raw_ports = []
+                for p in args.ports.split(","):
+                    p_str = p.strip()
+                    if p_str:
+                        try:
+                            raw_ports.append(int(p_str))
+                        except ValueError:
+                            pass
                 port_list = [p for p in raw_ports if 1 <= p <= 65535]
                 if not port_list:
                     port_list = [80]
@@ -761,7 +778,7 @@ def main() -> None:
                         sys.stderr.write(f"WARNING: send failed on {iface}: {err}\n")
                         break
                     log_audit(audit_f, audit_id, "tcp_syn", target_ip, vid, args.qinq, src_mac, dst_mac, seq,
-                              {"dport": port, "sport": sport, "ip_version": 6 if is_v6 else 4, "seq": isn})
+                              {"dport": port, "sport": sport, "ip_version": 6 if is_v6 else 4, "tcp_seq": isn})
                     packet_count += 1
                     time.sleep(pacing_interval)
 
@@ -792,10 +809,10 @@ def main() -> None:
                 is_v6 = ":" in target_ip
                 if is_v6:
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
                 else:
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
 
                 seq += 1
                 sport = cryptorand.randint(30000, 60000)
@@ -828,10 +845,10 @@ def main() -> None:
                 is_v6 = ":" in target_ip
                 if is_v6:
                     src_ip6 = resolve_source_ipv6(iface, target_ip, args.src_ip6).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, True, src_mac, src_ip6, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
                 else:
                     src_ip = resolve_source_ip(iface, target_ip, args.src_ip).split("%")[0]
-                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                    dst_mac = resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
 
                 seq += 1
                 sport = cryptorand.randint(30000, 60000)
@@ -864,7 +881,7 @@ def main() -> None:
                     sys.exit(1)
                 is_bcast = (target_ip == "255.255.255.255")
                 src_ip = resolve_source_ip(iface, target_ip if not is_bcast else "", args.src_ip).split("%")[0]
-                dst_mac = "ff:ff:ff:ff:ff:ff" if is_bcast else resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid)
+                dst_mac = "ff:ff:ff:ff:ff:ff" if is_bcast else resolve_dst_mac(iface, target_ip, False, src_mac, src_ip, vid, qinq_tuple, pcp=pcp, dei=dei, qinq_tpid=qinq_tpid, fallback_mode=fallback_mode)
 
                 seq += 1
                 sport = cryptorand.randint(30000, 60000)
@@ -885,9 +902,14 @@ def main() -> None:
                 time.sleep(pacing_interval)
 
     finally:
-        sock.close()
-        audit_f.flush()
-        audit_f.close()
+        if sock is not None:
+            sock.close()
+        if audit_f is not None:
+            try:
+                audit_f.flush()
+                audit_f.close()
+            except Exception:
+                pass
 
     print(f"Probe execution finished: {packet_count} packet(s) transmitted across {len(vlan_list)} VLAN profile(s).")
 

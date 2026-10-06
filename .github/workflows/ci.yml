@@ -42,8 +42,12 @@ jobs:
             iptables \
             procps \
             wpa_supplicant \
+            python3-pip \
             python3-scapy \
-            python3-jsonschema
+            python3-jsonschema \
+            python3-pytest \
+            python3-pytest-cov
+          pip3 install --break-system-packages ruff mypy
 
       - name: Run ShellCheck & Unprivileged Tests
         run: |

@@ -3,6 +3,7 @@ BINDIR ?= $(PREFIX)/sbin
 LIBDIR ?= $(PREFIX)/lib/net-tap
 
 export PYTHONDONTWRITEBYTECODE = 1
+export PATH := $(HOME)/.local/bin:$(PATH)
 
 all: lint
 

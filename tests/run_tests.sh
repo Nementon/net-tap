@@ -5,6 +5,10 @@
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
+TEST_STATE_DIR=$(mktemp -d /tmp/net-tap-test-state.XXXXXX)
+chmod 700 "${TEST_STATE_DIR}"
+export STATE_DIR="${TEST_STATE_DIR}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_PATH="${SCRIPT_DIR}/../bin/net-tap.sh"
 FIXTURES_DIR="${SCRIPT_DIR}/fixtures"
@@ -28,6 +32,7 @@ done
 # shellcheck disable=SC2317 # Asynchronous trap cleanup handler invoked on EXIT/INT/TERM signals
 cleanup() {
     local exit_code=$?
+    if [[ -n "${TEST_STATE_DIR:-}" ]]; then rm -rf "${TEST_STATE_DIR}" 2>/dev/null || true; fi
     if [[ -n "${TMP_PRIV_DIR:-}" ]]; then rm -rf "${TMP_PRIV_DIR}" 2>/dev/null || true; fi
     if [[ -n "${EMPTY_DIR:-}" ]]; then rm -rf "${EMPTY_DIR}" 2>/dev/null || true; fi
     if [[ -n "${STATE_SEC_DIR:-}" ]]; then rm -rf "${STATE_SEC_DIR}" 2>/dev/null || true; fi
@@ -514,6 +519,18 @@ if [[ -d "$FIXTURES_DIR" && -f "$FIXTURES_DIR/synthetic_carrier_trace.pcap" ]]; 
         assert_jq '.dpi.bgp_asns | index("65002") != null'
         assert_jq '.dpi.dhcp_hostnames | index("srv-dc01") != null'
         assert_jq '.dpi.tls_sni | index("login.microsoftonline.com") != null'
+        assert_jq '.qinq_tuples | index("100,200") != null'
+        assert_jq '.qinq_tuples | index("300,400") != null'
+        assert_jq '.qinq_tuples | index("600,700") != null'
+        assert_jq '.mpls_labels | index("1001") != null'
+        assert_jq '.mpls_labels | index("2001") != null'
+        assert_jq '.mpls_max_stack_depth == 2'
+        assert_jq '.mobile_core.gtp_u == 2'
+        assert_jq '.mobile_core.gtp_c == 1'
+        assert_jq '.mobile_core.active_teids | index("0x00000000") != null'
+        assert_jq '.ipv4_multicast_groups | index("224.0.0.5") != null'
+        assert_jq '.ipv6_multicast_groups | index("ff02::1") != null'
+        assert_jq '.protocols.pcp_cos_distribution["0"] != null'
         
         if [[ $jq_errors -eq 0 ]]; then
             echo "PASSED"
@@ -1452,6 +1469,7 @@ sniff(iface='veth-peer', timeout=60, prn=process_pkt, started_callback=on_starte
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --vlan 100 --arp-scan 10.100.1.1/32 --rate 50
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --vlan 100,102 --arp-scan 10.100.1.1/32 --rate 50
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --vlan 100-101 --arp-scan 10.100.1.1/32 --rate 50
+    assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --qinq 100,200 --pcp 3 --dei 1 --arp-scan 10.100.1.1/32 --rate 50
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --auto-vlans --arp-scan 10.100.1.1/32 --rate 50
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --dhcp-discover
     assert_success "$BIN_PATH" probe -n "${TEST_NS}" -i veth-tap --icmp-pmtu 192.0.2.99

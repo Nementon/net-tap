@@ -453,6 +453,32 @@
         },
         "probes_sent": { "type": "integer", "minimum": 0 },
         "responses_received": { "type": "integer", "minimum": 0 },
+        "watermarked_egress_frames": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total frames captured bearing session watermark (fwmark 0x7a9 / DSCP CS7)"
+        },
+        "vlan_tagged_frames": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 },
+          "description": "Mapping of VLAN ID to observed frame count during execution"
+        },
+        "exec_sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["timestamp", "command", "exit_code", "datapath_profile"],
+            "properties": {
+              "timestamp": { "type": "string" },
+              "command": { "type": "string" },
+              "exit_code": { "type": "integer" },
+              "datapath_profile": { "type": "string", "enum": ["stateful_netns", "stateless_tc", "darwin_pf", "host"] },
+              "vlan": { "type": ["integer", "null"] },
+              "qinq": { "type": ["string", "null"] }
+            },
+            "additionalProperties": false
+          }
+        },
         "vlans_probed": {
           "type": "array",
           "items": { "type": "string", "pattern": "^(untagged|([1-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-4])([,/]([1-9]|[1-9][0-9]{1,2}|[1-3][0-9]{3}|40[0-8][0-9]|409[0-4]))?)$" }

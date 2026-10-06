@@ -52,34 +52,56 @@ except ImportError as err:
 
 SO_MARK = getattr(socket, "SO_MARK", 36)  # Linux SO_MARK socket option
 PROBE_FWMARK = 0x7a9  # 1961 - Net-Tap fwmark & wire watermark identifier
-SIOCGIFHWADDR = 0x8927  # Linux ioctl to get hardware MAC address
-ETH_P_ALL = 0x0003  # Linux protocol identifier for all incoming L2 frames
-ETH_P_ARP = 0x0806  # Ethernet protocol ARP (0x0806)
-ETH_P_IPV6 = 0x86dd  # Ethernet protocol IPv6 (0x86dd)
+SIOCGIFHWADDR = getattr(socket, "SIOCGIFHWADDR", 0x8927)  # Linux ioctl to get hardware MAC address
+ETH_P_ALL = getattr(socket, "ETH_P_ALL", 0x0003)  # Linux protocol identifier for all incoming L2 frames
+ETH_P_ARP = getattr(socket, "ETH_P_ARP", 0x0806)  # Ethernet protocol ARP (0x0806)
+ETH_P_IPV6 = getattr(socket, "ETH_P_IPV6", 0x86dd)  # Ethernet protocol IPv6 (0x86dd)
+AF_PACKET = getattr(socket, "AF_PACKET", 17)
+IS_DARWIN = sys.platform == "darwin"
 
 MAC_RESOLUTION_CACHE: Dict[Tuple[Any, ...], str] = {}
 cryptorand = secrets.SystemRandom()
 
 
 def get_iface_mac(iface: str, explicit_mac: Optional[str] = None) -> str:
-    """Retrieve physical MAC address of interface with explicit override and sysfs fallback."""
+    """Retrieve physical MAC address of interface with explicit override and sysfs/ifconfig fallback."""
     if explicit_mac:
         clean = explicit_mac.strip().lower()
         if re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", clean):
             return clean
+    if not IS_DARWIN:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                info = fcntl.ioctl(s.fileno(), SIOCGIFHWADDR, struct.pack('256s', iface[:15].encode('utf-8')))
+                mac = ':'.join(f'{b:02x}' for b in info[18:24])
+                if mac and len(mac) == 17 and mac != "00:00:00:00:00:00":
+                    return mac
+        except Exception:
+            pass
+        try:
+            with open(f"/sys/class/net/{iface}/address", "r") as f:
+                mac = f.read().strip()
+                if mac and len(mac) == 17 and mac != "00:00:00:00:00:00":
+                    return mac
+        except Exception:
+            pass
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            info = fcntl.ioctl(s.fileno(), SIOCGIFHWADDR, struct.pack('256s', iface[:15].encode('utf-8')))
-            mac = ':'.join(f'{b:02x}' for b in info[18:24])
-            if mac and len(mac) == 17 and mac != "00:00:00:00:00:00":
-                return mac
+        import scapy.arch
+        mac = scapy.arch.get_if_hwaddr(iface)
+        if mac and len(mac) == 17 and mac != "00:00:00:00:00:00":
+            return mac.lower()
     except Exception:
         pass
     try:
-        with open(f"/sys/class/net/{iface}/address", "r") as f:
-            mac = f.read().strip()
-            if mac and len(mac) == 17 and mac != "00:00:00:00:00:00":
-                return mac
+        res = subprocess.run(["ifconfig", iface], capture_output=True, text=True, check=False)
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("ether "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    mac = parts[1].strip().lower()
+                    if len(mac) == 17 and mac != "00:00:00:00:00:00":
+                        return mac
     except Exception:
         pass
     return "02:00:00:aa:bb:cc"
@@ -87,16 +109,29 @@ def get_iface_mac(iface: str, explicit_mac: Optional[str] = None) -> str:
 
 def get_link_local_ipv6(iface: str) -> str:
     """Query assigned link-local IPv6 address for interface with EUI-64 fallback."""
+    if not IS_DARWIN:
+        try:
+            if os.path.exists("/proc/net/if_inet6"):
+                with open("/proc/net/if_inet6", "r") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 6 and parts[5] == iface:
+                            raw_ip = parts[0]
+                            if raw_ip.lower().startswith("fe80"):
+                                chunks = [raw_ip[i:i+4] for i in range(0, 32, 4)]
+                                return ipaddress.IPv6Address(":".join(chunks)).compressed
+        except Exception:
+            pass
     try:
-        if os.path.exists("/proc/net/if_inet6"):
-            with open("/proc/net/if_inet6", "r") as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 6 and parts[5] == iface:
-                        raw_ip = parts[0]
-                        if raw_ip.lower().startswith("fe80"):
-                            chunks = [raw_ip[i:i+4] for i in range(0, 32, 4)]
-                            return ipaddress.IPv6Address(":".join(chunks)).compressed
+        res = subprocess.run(["ifconfig", iface], capture_output=True, text=True, check=False)
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("inet6 "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    addr = parts[1].split("%")[0].strip()
+                    if addr.lower().startswith("fe80"):
+                        return ipaddress.IPv6Address(addr).compressed
     except Exception:
         pass
     try:
@@ -118,15 +153,28 @@ def resolve_source_ip(iface: str, target_ip: str = "", explicit_src: Optional[st
             return clean_src
         except ValueError:
             pass
+    if not IS_DARWIN:
+        try:
+            res = subprocess.run(["ip", "-4", "addr", "show", "dev", iface],
+                                 capture_output=True, text=True, check=False)
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("inet "):
+                    ip_part = line.split()[1].split("/")[0]
+                    if ip_part and ip_part != "0.0.0.0":
+                        return ip_part
+        except Exception:
+            pass
     try:
-        res = subprocess.run(["ip", "-4", "addr", "show", "dev", iface],
-                             capture_output=True, text=True, check=False)
+        res = subprocess.run(["ifconfig", iface], capture_output=True, text=True, check=False)
         for line in res.stdout.splitlines():
             line = line.strip()
             if line.startswith("inet "):
-                ip_part = line.split()[1].split("/")[0]
-                if ip_part and ip_part != "0.0.0.0":
-                    return ip_part
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip_part = parts[1].split("/")[0]
+                    if ip_part and ip_part != "0.0.0.0":
+                        return ip_part
     except Exception:
         pass
     if target_ip:
@@ -167,14 +215,24 @@ def resolve_source_ipv6(iface: str, target_ip: str = "", explicit_src: Optional[
             clean_tgt = target_ip.split("%")[0].split("/")[0]
             tgt_addr = ipaddress.ip_address(clean_tgt)
             if isinstance(tgt_addr, ipaddress.IPv6Address) and not tgt_addr.is_link_local:
-                res = subprocess.run(["ip", "-6", "addr", "show", "dev", iface, "scope", "global"],
-                                     capture_output=True, text=True, check=False)
+                if not IS_DARWIN:
+                    res = subprocess.run(["ip", "-6", "addr", "show", "dev", iface, "scope", "global"],
+                                         capture_output=True, text=True, check=False)
+                    for line in res.stdout.splitlines():
+                        line = line.strip()
+                        if line.startswith("inet6 "):
+                            ip_part = line.split()[1].split("/")[0].split("%")[0]
+                            if ip_part and not ip_part.lower().startswith("fe80"):
+                                return ip_part
+                res = subprocess.run(["ifconfig", iface], capture_output=True, text=True, check=False)
                 for line in res.stdout.splitlines():
                     line = line.strip()
                     if line.startswith("inet6 "):
-                        ip_part = line.split()[1].split("/")[0].split("%")[0]
-                        if ip_part and not ip_part.lower().startswith("fe80"):
-                            return ip_part
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            ip_part = parts[1].split("/")[0].split("%")[0]
+                            if ip_part and not ip_part.lower().startswith("fe80"):
+                                return ip_part
         except Exception:
             pass
     return get_link_local_ipv6(iface).split("%")[0]
@@ -213,35 +271,60 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
         # Route lookup: if target is routed via an off-link gateway, resolve the gateway's MAC (RFC 1812 / RFC 4291)
         route_tgt = str(tgt_obj)
         try:
-            cmd = ["ip", "-6" if is_v6 else "-4", "route", "get", route_tgt, "dev", iface]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode != 0:
-                res = subprocess.run(["ip", "-6" if is_v6 else "-4", "route", "get", route_tgt],
+            if IS_DARWIN:
+                res = subprocess.run(["route", "-n", "get", route_tgt],
                                      capture_output=True, text=True, check=False)
-            if res.returncode == 0:
-                words = res.stdout.split()
-                if "via" in words:
-                    idx = words.index("via")
-                    if idx + 1 < len(words):
-                        gw_ip = words[idx + 1].split("%")[0]
+                for line in res.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("gateway:"):
+                        gw_ip = line.split()[1].split("%")[0]
                         tgt_obj = ipaddress.ip_address(gw_ip)
+                        break
+            else:
+                cmd = ["ip", "-6" if is_v6 else "-4", "route", "get", route_tgt, "dev", iface]
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if res.returncode != 0:
+                    res = subprocess.run(["ip", "-6" if is_v6 else "-4", "route", "get", route_tgt],
+                                         capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    words = res.stdout.split()
+                    if "via" in words:
+                        idx = words.index("via")
+                        if idx + 1 < len(words):
+                            gw_ip = words[idx + 1].split("%")[0]
+                            tgt_obj = ipaddress.ip_address(gw_ip)
         except Exception:
             pass
 
         if is_v6 and isinstance(tgt_obj, ipaddress.IPv6Address):
-            res = subprocess.run(["ip", "-6", "neigh", "show", "dev", iface, str(tgt_obj)],
-                                 capture_output=True, text=True, check=False)
-            for line in res.stdout.splitlines():
-                parts = line.split()
-                if "lladdr" in parts:
-                    idx = parts.index("lladdr")
-                    if idx + 1 < len(parts):
-                        resolved = parts[idx + 1]
-                        MAC_RESOLUTION_CACHE[cache_key] = resolved
-                        return resolved
+            if IS_DARWIN:
+                try:
+                    res = subprocess.run(["ndp", "-an"], capture_output=True, text=True, check=False)
+                    for line in res.stdout.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 3 and parts[0].split("%")[0] == str(tgt_obj) and parts[2] == iface:
+                            raw_mac = parts[1]
+                            mac_octets = [f"{int(x, 16):02x}" for x in raw_mac.split(":")]
+                            if len(mac_octets) == 6:
+                                resolved = ":".join(mac_octets)
+                                MAC_RESOLUTION_CACHE[cache_key] = resolved
+                                return resolved
+                except Exception:
+                    pass
+            else:
+                res = subprocess.run(["ip", "-6", "neigh", "show", "dev", iface, str(tgt_obj)],
+                                     capture_output=True, text=True, check=False)
+                for line in res.stdout.splitlines():
+                    parts = line.split()
+                    if "lladdr" in parts:
+                        idx = parts.index("lladdr")
+                        if idx + 1 < len(parts):
+                            resolved = parts[idx + 1]
+                            MAC_RESOLUTION_CACHE[cache_key] = resolved
+                            return resolved
 
             # Pre-flight ICMPv6 Neighbor Solicitation if src_mac provided
-            if src_mac and src_ip:
+            if not IS_DARWIN and hasattr(socket, "AF_PACKET") and src_mac and src_ip:
                 try:
                     src_ip_clean = src_ip.split("%")[0]
                     last_24 = tgt_obj.exploded[-7:].replace(":", "")
@@ -276,29 +359,47 @@ def resolve_dst_mac(iface: str, target_ip: str, is_v6: bool,
             return fallback
 
         elif not is_v6 and isinstance(tgt_obj, ipaddress.IPv4Address):
-            if os.path.exists("/proc/net/arp"):
-                with open("/proc/net/arp", "r") as f:
-                    for line in f:
-                        parts = line.split()
-                        if len(parts) >= 6 and parts[0] == str(tgt_obj) and parts[5] == iface:
-                            if parts[3] != "00:00:00:00:00:00":
-                                resolved = parts[3]
-                                MAC_RESOLUTION_CACHE[cache_key] = resolved
-                                return resolved
+            if IS_DARWIN:
+                try:
+                    res = subprocess.run(["arp", "-an"], capture_output=True, text=True, check=False)
+                    for line in res.stdout.splitlines():
+                        if f"({tgt_obj})" in line and f"on {iface}" in line:
+                            parts = line.split()
+                            if "at" in parts:
+                                idx = parts.index("at")
+                                if idx + 1 < len(parts):
+                                    raw_mac = parts[idx + 1]
+                                    mac_octets = [f"{int(x, 16):02x}" for x in raw_mac.split(":")]
+                                    if len(mac_octets) == 6:
+                                        resolved = ":".join(mac_octets)
+                                        MAC_RESOLUTION_CACHE[cache_key] = resolved
+                                        return resolved
+                except Exception:
+                    pass
+            else:
+                if os.path.exists("/proc/net/arp"):
+                    with open("/proc/net/arp", "r") as f:
+                        for line in f:
+                            parts = line.split()
+                            if len(parts) >= 6 and parts[0] == str(tgt_obj) and parts[5] == iface:
+                                if parts[3] != "00:00:00:00:00:00":
+                                    resolved = parts[3]
+                                    MAC_RESOLUTION_CACHE[cache_key] = resolved
+                                    return resolved
 
-            res = subprocess.run(["ip", "-4", "neigh", "show", "dev", iface, str(tgt_obj)],
-                                 capture_output=True, text=True, check=False)
-            for line in res.stdout.splitlines():
-                parts = line.split()
-                if "lladdr" in parts:
-                    idx = parts.index("lladdr")
-                    if idx + 1 < len(parts):
-                        resolved = parts[idx + 1]
-                        MAC_RESOLUTION_CACHE[cache_key] = resolved
-                        return resolved
+                res = subprocess.run(["ip", "-4", "neigh", "show", "dev", iface, str(tgt_obj)],
+                                     capture_output=True, text=True, check=False)
+                for line in res.stdout.splitlines():
+                    parts = line.split()
+                    if "lladdr" in parts:
+                        idx = parts.index("lladdr")
+                        if idx + 1 < len(parts):
+                            resolved = parts[idx + 1]
+                            MAC_RESOLUTION_CACHE[cache_key] = resolved
+                            return resolved
 
             # Pre-flight ARP resolution if src_mac provided
-            if src_mac:
+            if not IS_DARWIN and hasattr(socket, "AF_PACKET") and src_mac:
                 try:
                     s_ip = (src_ip or "0.0.0.0").split("%")[0]
                     arp_req = ARP(op=1, hwsrc=src_mac, psrc=s_ip, pdst=str(tgt_obj))
@@ -353,19 +454,49 @@ def wrap_l2(payload: Any, dst_mac: str, src_mac: str,
         return Ether(src=src_mac, dst=dst_mac) / payload
 
 
-def create_probe_socket(iface: str) -> socket.socket:
-    """Open an AF_PACKET raw socket stamped with SO_MARK 0x7a9."""
-    try:
-        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
-        sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
-        sock.bind((iface, 0))
-        return sock
-    except PermissionError:
-        sys.stderr.write("ERROR: Raw socket creation requires root privileges (CAP_NET_RAW).\n")
-        sys.exit(1)
-    except OSError as e:
-        sys.stderr.write(f"ERROR: Failed to bind raw socket on interface '{iface}': {e}\n")
-        sys.exit(1)
+def create_probe_socket(iface: str) -> Any:
+    """Open an AF_PACKET raw socket on Linux or a BPF socket on Darwin."""
+    if IS_DARWIN:
+        try:
+            from scapy.config import conf
+
+            class DarwinBPFSocket:
+                def __init__(self, interface: str):
+                    self.iface = interface
+                    self.sock = conf.L2socket(iface=interface)
+
+                def send(self, data: bytes) -> int:
+                    return self.sock.send(data)
+
+                def close(self) -> None:
+                    if hasattr(self.sock, "close"):
+                        self.sock.close()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    self.close()
+
+            return DarwinBPFSocket(iface)
+        except PermissionError:
+            sys.stderr.write("ERROR: BPF device access on macOS requires root privileges (sudo).\n")
+            sys.exit(1)
+        except Exception as e:
+            sys.stderr.write(f"ERROR: Failed to open BPF socket on interface '{iface}': {e}\n")
+            sys.exit(1)
+    else:
+        try:
+            sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+            sock.setsockopt(socket.SOL_SOCKET, SO_MARK, PROBE_FWMARK)
+            sock.bind((iface, 0))
+            return sock
+        except PermissionError:
+            sys.stderr.write("ERROR: Raw socket creation requires root privileges (CAP_NET_RAW).\n")
+            sys.exit(1)
+        except OSError as e:
+            sys.stderr.write(f"ERROR: Failed to bind raw socket on interface '{iface}': {e}\n")
+            sys.exit(1)
 
 
 def parse_args() -> argparse.Namespace:

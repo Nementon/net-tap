@@ -4,45 +4,16 @@
 
 # --- Function: Comprehensive Physical Link Detection ---
 detect_port_status() {
-    local target_iface="$1"
-    local carrier_file="/sys/class/net/${target_iface}/carrier"
-    local operstate_file="/sys/class/net/${target_iface}/operstate"
-    local carrier="0"
-    local operstate="down"
-    local ethtool_link="no"
-    local speed="N/A"
-    local duplex="N/A"
-
-    if cmd_netns test -f "${carrier_file}"; then
-        carrier=$(cmd_netns cat "${carrier_file}" 2>/dev/null || echo "0")
-    fi
-    if cmd_netns test -f "${operstate_file}"; then
-        operstate=$(cmd_netns cat "${operstate_file}" 2>/dev/null || echo "unknown")
-    fi
-
-    if command -v ethtool &>/dev/null; then
-        local eth_out
-        eth_out=$(cmd_netns ethtool "${target_iface}" 2>/dev/null || true)
-        if echo "${eth_out}" | grep -q "Link detected: yes"; then
-            ethtool_link="yes"
-        fi
-        speed=$(echo "${eth_out}" | awk -F': ' '/Speed:/ {print $2}')
-        duplex=$(echo "${eth_out}" | awk -F': ' '/Duplex:/ {print $2}')
-        speed="${speed:-N/A}"
-        duplex="${duplex:-N/A}"
-    fi
-
-    # Evaluate Combined Port State
-    if [[ "${carrier}" == "1" || "${ethtool_link}" == "yes" ]]; then
-        echo "ACTIVE|${speed}|${duplex}|${operstate}"
-    else
-        echo "INACTIVE|N/A|N/A|${operstate}"
-    fi
+    platform_detect_port_status "$@"
 }
 
 # --- Helper: Unified Interface State Restorer ---
 restore_interface_state() {
     local iface="$1"
+    if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+        platform_restore_interface_state "${iface}"
+        return 0
+    fi
     declare -g -A ORIG_PROMISC ORIG_ARP ORIG_MTU ORIG_TXQLEN ORIG_RX_RING ORIG_GRO ORIG_LRO ORIG_TSO ORIG_GSO ORIG_RX ORIG_RXVLAN ORIG_RX_VLAN_FILTER ORIG_RX_ALL
     declare -g -A ORIG_IPV6_DISABLE ORIG_IPV6_KEEP_ADDR ORIG_IPV6_ADDR_GEN ORIG_IPV6_DAD ORIG_IPV6_DADT ORIG_IPV6_RA ORIG_IPV6_RS ORIG_IPV6_AUTOCONF ORIG_IPV6_TEMP ORIG_IPV6_EDAD ORIG_IPV6_NDISC ORIG_IPV6_REDIR
     declare -g -A ORIG_MLDV1_INTVAL ORIG_MLDV2_INTVAL ORIG_MLD_VER ORIG_DROP_UNA ORIG_ACCEPT_UNA ORIG_IPV6_FWD ORIG_IPV6_MC_FWD ORIG_PROXY_NDP ORIG_IPV6_DROP_UNICAST_L2M
@@ -227,7 +198,9 @@ _disk_watchdog_worker() {
         if [[ -n "${capture_pids}" ]]; then
             local all_alive=1
             for tpid in ${capture_pids}; do
-                if ! kill -0 "${tpid}" 2>/dev/null || ! grep -q "tcpdump" "/proc/${tpid}/comm" 2>/dev/null; then
+                local pcomm
+                pcomm=$(get_proc_comm "${tpid}")
+                if ! kill -0 "${tpid}" 2>/dev/null || [[ -z "${pcomm}" ]] || ! echo "${pcomm}" | grep -q "tcpdump"; then
                     all_alive=0
                     break
                 fi
@@ -369,6 +342,55 @@ start_tap() {
 
     for iface in "${IFACES_ARR[@]}"; do
         CONFIGURED_IFACES+=("${iface}")
+
+        if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+            log_warn "macOS detected: Starting tap on ${iface} under Profile 2 (Tactical Lab Discovery)."
+            log_warn "Notice: Zero-egress stealth guarantees are best-effort on macOS."
+            log_warn "Outbound host chatter suppression applied via PF anchor 'net_tap_${iface}'."
+            ifconfig "${iface}" up 2>/dev/null || true
+            ifconfig "${iface}" promisc 2>/dev/null || true
+            darwin_enable_pf_drop "${iface}"
+
+            local PCAP_FILE="${OUT_DIR}/${TIMESTAMP}_${iface}_trace.pcap"
+            local DMESG_LOG="${OUT_DIR}/${TIMESTAMP}_${iface}_dmesg.log"
+            local LINK_LOG="${OUT_DIR}/${TIMESTAMP}_${iface}_link_events.log"
+            local TCPDUMP_ERR="${OUT_DIR}/${TIMESTAMP}_${iface}_tcpdump.log"
+
+            _close_lock_fds() {
+                for lfd in ${HELD_LOCK_FDS[@]+"${HELD_LOCK_FDS[@]}"}; do
+                    if [[ -n "${lfd}" ]]; then eval "exec ${lfd}>&-" 2>/dev/null || true; fi
+                done
+            }
+
+            echo "[INFO] macOS host system diagnostics." > "${DMESG_LOG}"
+            echo "[INFO] macOS link events logging not supported by netlink." > "${LINK_LOG}"
+
+            local TCPDUMP_CMD=(
+                tcpdump
+                -i "${iface}"
+                -B 4096
+                -s 0
+                -C "${ROTATE_SIZE}"
+                -W "${ROTATE_COUNT}"
+                -w "${PCAP_FILE}"
+            )
+            if tcpdump -Z root -h >/dev/null 2>&1; then
+                TCPDUMP_CMD=(-Z root "${TCPDUMP_CMD[@]}")
+            fi
+            if [[ "${COMPRESS_PCAPS}" -eq 1 ]]; then
+                TCPDUMP_CMD+=("-z" "gzip")
+            fi
+            if [[ -n "${BPF_FILTER}" ]]; then
+                TCPDUMP_CMD+=("--" "${BPF_FILTER}")
+            fi
+
+            ( _close_lock_fds; exec "${TCPDUMP_CMD[@]}" ) > "${TCPDUMP_ERR}" 2>&1 &
+            local PID_TCPDUMP=$!
+            PIDS_TCPDUMP+=("${PID_TCPDUMP}")
+            PCAP_FILES+=("${PCAP_FILE}")
+            continue
+        fi
+
         # 1. Capture current interface parameters
         if command -v nmcli >/dev/null 2>&1 && cmd_netns nmcli device status 2>/dev/null | grep -qw "${iface}"; then
             ORIG_NM_MANAGED[$iface]="unmanaged"
@@ -1130,12 +1152,27 @@ clean_sessions() {
         log_err "Security violation: Master lock '${master_lock}' is a symlink!"
         exit 1
     fi
-    local master_fd
-    exec {master_fd}>>"${master_lock}"
-    if ! flock -x -w 10 "${master_fd}"; then
-        _close_fd "${master_fd}"
-        log_err "Could not acquire master lock on ${master_lock} within 10s."
-        exit 1
+    local master_fd=""
+    local master_dir="${master_lock}.lockdir"
+    if command -v flock >/dev/null 2>&1 && [[ -z "${NET_TAP_NO_FLOCK:-}" ]]; then
+        exec {master_fd}>>"${master_lock}"
+        if ! flock -x -w 10 "${master_fd}"; then
+            _close_fd "${master_fd}"
+            log_err "Could not acquire master lock on ${master_lock} within 10s."
+            exit 1
+        fi
+    else
+        local start_t
+        start_t=$(date +%s)
+        while ! mkdir "${master_dir}" 2>/dev/null; do
+            local now_t
+            now_t=$(date +%s)
+            if (( now_t - start_t >= 10 )); then
+                log_err "Could not acquire directory master lock within 10s."
+                exit 1
+            fi
+            sleep 0.1
+        done
     fi
 
     if [[ -d "${STATE_DIR}" ]]; then
@@ -1205,7 +1242,13 @@ clean_sessions() {
             done
 
             # Load state file if possible to restore original sysctl, MTU, and offload configurations
-            if [[ "${s_validity}" == "valid" ]] && load_state_file "${sfile}" 2>/dev/null; then
+            if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+                IFS=',' read -ra if_arr <<< "${s_iface}"
+                for dev in "${if_arr[@]}"; do
+                    darwin_disable_pf_drop "${dev}"
+                    ifconfig "${dev}" -promisc 2>/dev/null || true
+                done
+            elif [[ "${s_validity}" == "valid" ]] && load_state_file "${sfile}" 2>/dev/null; then
                 NETNS="${s_netns}"
                 IFS=',' read -ra if_arr <<< "${s_iface}"
                 for dev in "${if_arr[@]}"; do
@@ -1265,6 +1308,12 @@ clean_sessions() {
                     cleaned_locks=$((cleaned_locks + 1))
                 fi
             done
+            for lkd in "${STATE_DIR}"/.lock_*.lockdir; do
+                [[ -d "${lkd}" ]] || continue
+                if rmdir "${lkd}" 2>/dev/null; then
+                    cleaned_locks=$((cleaned_locks + 1))
+                fi
+            done
         else
             local safe_i="${filter_iface//\//_}"
             local safe_n="${filter_netns//\//_}"
@@ -1278,11 +1327,19 @@ clean_sessions() {
                     cleaned_locks=$((cleaned_locks + 1))
                 fi
             fi
+            if [[ -d "${lk}.lockdir" ]]; then
+                if rmdir "${lk}.lockdir" 2>/dev/null; then
+                    cleaned_locks=$((cleaned_locks + 1))
+                fi
+            fi
         fi
     fi
 
-    flock -u "${master_fd}" 2>/dev/null || true
-    _close_fd "${master_fd}"
+    if [[ -n "${master_fd}" ]]; then
+        flock -u "${master_fd}" 2>/dev/null || true
+        _close_fd "${master_fd}"
+    fi
+    rmdir "${master_lock}.lockdir" 2>/dev/null || true
 
     log_ok "Cleanup complete: ${cleaned_sessions} session(s) detached, ${cleaned_locks} lock file(s) purged."
 }

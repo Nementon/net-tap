@@ -22,12 +22,21 @@ echo "================================================="
 FAILED=0
 PASSED=0
 
-for cmd in ip tc awk grep mktemp; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Error: Required command '$cmd' not found." >&2
-        exit 1
-    fi
-done
+if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+    for cmd in awk grep mktemp; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo "Error: Required command '$cmd' not found." >&2
+            exit 1
+        fi
+    done
+else
+    for cmd in ip tc awk grep mktemp; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo "Error: Required command '$cmd' not found." >&2
+            exit 1
+        fi
+    done
+fi
 
 # shellcheck disable=SC2317 # Asynchronous trap cleanup handler invoked on EXIT/INT/TERM signals
 cleanup() {
@@ -959,10 +968,13 @@ fi
 
 # --- 6. End-to-End Namespace Lifecycle & Egress Drop Verification (Root Only) ---
 if [[ $EUID -eq 0 ]]; then
-    TEST_NS="nettap_test_$$"
-    TEST_CAPTURE_DIR=$(mktemp -d /tmp/net-tap-test-captures.XXXXXX)
-    echo "[TEST] Provisioning isolated test network namespace '${TEST_NS}'..."
-    ip netns add "${TEST_NS}"
+    if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+        echo -e "\n${C_YELLOW}[WARNING] macOS detected: Skipping Linux network namespace & tc clsact integration tests (Section 6).${C_RESET}"
+    else
+        TEST_NS="nettap_test_$$"
+        TEST_CAPTURE_DIR=$(mktemp -d /tmp/net-tap-test-captures.XXXXXX)
+        echo "[TEST] Provisioning isolated test network namespace '${TEST_NS}'..."
+        ip netns add "${TEST_NS}"
     
     ip netns exec "${TEST_NS}" ip link add name veth-tap type veth peer name veth-peer
     ip netns exec "${TEST_NS}" ip link set dev veth-peer up
@@ -1567,9 +1579,221 @@ except Exception as e:
     assert_success "$BIN_PATH" list
     assert_success "$BIN_PATH" list -j
     assert_success "$BIN_PATH" clean
+    fi
 else
     echo "[WARNING] Not running as root, skipping Section 6 tests."
 fi
+
+# --- 7. Darwin Platform Abstraction, Locking Fallback & Constraints Verification ---
+echo ""
+echo "================================================="
+echo " Section 7: Darwin Platform Abstraction & Fallbacks"
+echo "================================================="
+
+# 7.1 Darwin ifconfig status, media and link speed parser
+echo -n "[TEST] Verifying Darwin ifconfig parser (1Gbps Full Duplex, active)... "
+STATUS_1G=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	options=6463<RXCSUM,TXCSUM,VLAN_MTU,TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>
+	ether a4:83:e7:2b:88:12
+	inet 192.168.1.50 netmask 0xffffff00 broadcast 192.168.1.255
+	media: autoselect (1000baseT <full-duplex,flow-control>)
+	status: active
+EOF
+    }
+    platform_detect_port_status en0
+")
+if [[ "${STATUS_1G}" == "ACTIVE|1000Mb/s|Full|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'ACTIVE|1000Mb/s|Full|up', got '${STATUS_1G}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin ifconfig parser (10Gbps Full Duplex, active)... "
+STATUS_10G=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 9000
+	ether 00:3e:e1:c4:90:01
+	media: 10Gbase-T <full-duplex>
+	status: active
+EOF
+    }
+    platform_detect_port_status en1
+")
+if [[ "${STATUS_10G}" == "ACTIVE|10000Mb/s|Full|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'ACTIVE|10000Mb/s|Full|up', got '${STATUS_10G}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin ifconfig parser (inactive link)... "
+STATUS_INACTIVE=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        cat <<'EOF'
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	media: autoselect
+	status: inactive
+EOF
+    }
+    platform_detect_port_status en0
+")
+if [[ "${STATUS_INACTIVE}" == "INACTIVE|N/A|N/A|up" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'INACTIVE|N/A|N/A|up', got '${STATUS_INACTIVE}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin ifconfig parser (nonexistent interface down)... "
+STATUS_DOWN=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    ifconfig() {
+        return 1
+    }
+    platform_detect_port_status nonexist0
+")
+if [[ "${STATUS_DOWN}" == "INACTIVE|N/A|N/A|down" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'INACTIVE|N/A|N/A|down', got '${STATUS_DOWN}')"
+    FAILED=$((FAILED + 1))
+fi
+
+# 7.2 Darwin PF Egress Drop Rule Configuration and Flush
+echo -n "[TEST] Verifying Darwin PF egress block rule synthesis... "
+PF_TEST_OUT=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    log_ok() { :; }
+    log_warn() { :; }
+    pfctl() {
+        if [[ \"\$*\" == *\"-f -\"* ]]; then
+            cat
+        fi
+        return 0
+    }
+    darwin_enable_pf_drop 'en0'
+")
+if [[ "${PF_TEST_OUT}" == "block drop out quick on en0 all" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 'block drop out quick on en0 all', got '${PF_TEST_OUT}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying Darwin PF anchor flush invocation... "
+PF_FLUSH_ARGS=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh'
+    pfctl() {
+        echo \"\$*\"
+        return 0
+    }
+    darwin_disable_pf_drop 'en0'
+")
+if [[ "${PF_FLUSH_ARGS}" == *"-a net_tap_en0 -F all"* ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected '-a net_tap_en0 -F all', got '${PF_FLUSH_ARGS}')"
+    FAILED=$((FAILED + 1))
+fi
+
+# 7.3 Atomic Directory Session Locking Fallback (Simulated macOS without flock)
+echo -n "[TEST] Verifying directory locking fallback acquisition and mutual exclusion... "
+LOCK_TEST_DIR=$(mktemp -d /tmp/net-tap-lockdir-test.XXXXXX)
+if bash -c "
+    set -euo pipefail
+    STATE_DIR='${LOCK_TEST_DIR}'
+    NET_TAP_NO_FLOCK=1
+    source '${SCRIPT_DIR}/../lib/core.sh'
+    acquire_lock 'en0'
+    [[ -d \"\${STATE_DIR}/.lock_en0.lockdir\" ]] || exit 10
+    if ( acquire_lock 'en0' 2>/dev/null ); then
+        exit 11
+    fi
+    release_lock
+    [[ ! -d \"\${STATE_DIR}/.lock_en0.lockdir\" ]] || exit 12
+    exit 0
+"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying clean_sessions purges stale directory locks... "
+if bash -c "
+    set -euo pipefail
+    STATE_DIR='${LOCK_TEST_DIR}'
+    NET_TAP_NO_FLOCK=1
+    source '${SCRIPT_DIR}/../lib/core.sh'
+    source '${SCRIPT_DIR}/../lib/orchestration.sh'
+    require_root() { :; }
+    mkdir -p \"\${STATE_DIR}/.lock_stale.lockdir\"
+    mkdir -p \"\${STATE_DIR}/.lock_eth0.lockdir\"
+    clean_sessions >/dev/null 2>&1
+    if [[ -d \"\${STATE_DIR}/.lock_stale.lockdir\" || -d \"\${STATE_DIR}/.lock_eth0.lockdir\" || -d \"\${STATE_DIR}/.lock_master.lockdir\" ]]; then
+        exit 1
+    fi
+    exit 0
+"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (clean_sessions did not purge stale .lockdir directories)"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "${LOCK_TEST_DIR}" 2>/dev/null || true
+
+# 7.4 Darwin CLI Constraint Enforcement (-n / --netns and -t sfp)
+echo -n "[TEST] Verifying rejection of -n/--netns on Darwin... "
+DARWIN_NETNS_ERR=$(NET_TAP_PLATFORM=darwin "$BIN_PATH" on -i dummy0 -n testns 2>&1 || true)
+if echo "${DARWIN_NETNS_ERR}" | grep -q "Network namespaces (-n / --netns) are not supported on macOS"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected Darwin netns rejection message, got: '${DARWIN_NETNS_ERR}')"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying rejection of -t sfp on Darwin... "
+DARWIN_SFP_ERR=$(NET_TAP_PLATFORM=darwin "$BIN_PATH" on -i dummy0 -t sfp 2>&1 || true)
+if echo "${DARWIN_SFP_ERR}" | grep -q "Optical SFP/QSFP DDM telemetry (-t sfp) is not supported on macOS"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected Darwin SFP rejection message, got: '${DARWIN_SFP_ERR}')"
+    FAILED=$((FAILED + 1))
+fi
+
+# 7.5 Darwin Portable Path Resolution
+echo -n "[TEST] Verifying resolve_path helper on relative paths and symlinks... "
+PATH_TEST_DIR=$(mktemp -d /tmp/net-tap-pathtest.XXXXXX)
+touch "${PATH_TEST_DIR}/target_file"
+ln -s "${PATH_TEST_DIR}/target_file" "${PATH_TEST_DIR}/symlink_file"
+RESOLVED_OUT=$(bash -c "source '${SCRIPT_DIR}/../lib/core.sh' && resolve_path '${PATH_TEST_DIR}/symlink_file'")
+TARGET_REAL=$(bash -c "source '${SCRIPT_DIR}/../lib/core.sh' && resolve_path '${PATH_TEST_DIR}/target_file'")
+if [[ "${RESOLVED_OUT}" == "${TARGET_REAL}" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected '${TARGET_REAL}', got '${RESOLVED_OUT}')"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "${PATH_TEST_DIR}" 2>/dev/null || true
 
 echo "================================================="
 echo " Test Results: ${PASSED} Passed | ${FAILED} Failed"

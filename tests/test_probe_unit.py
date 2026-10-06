@@ -955,6 +955,70 @@ class TestProbeUnit(unittest.TestCase):
             if os.path.exists(audit_path):
                 os.unlink(audit_path)
 
+    def test_darwin_bpf_socket_creation(self):
+        """Test DarwinBPFSocket lifecycle and packet transmission on macOS."""
+        mock_l2_sock = MagicMock()
+        with patch.object(probe, "IS_DARWIN", True), \
+             patch("scapy.config.conf.L2socket", return_value=mock_l2_sock):
+            sock = probe.create_probe_socket("en0")
+            self.assertIsNotNone(sock)
+            sock.send(b"TESTPACKET")
+            mock_l2_sock.send.assert_called_once_with(b"TESTPACKET")
+            with sock:
+                pass
+            mock_l2_sock.close.assert_called()
+
+    def test_darwin_route_and_neighbor_resolution(self):
+        """Test Darwin route -n get, arp -an, and ndp -an resolution."""
+        arp_out = "? (192.168.1.1) at 0:11:22:33:44:55 on en0 ifscope [ethernet]\n"
+        ndp_out = "Neighbor Linklayer Address Netif Expire St Flgs\n2001:db8::1 0:11:22:33:44:55 en0 23h59m50s S R\n"
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            if cmd[:3] == ["route", "-n", "get"]:
+                if len(cmd) >= 4 and cmd[3] == "192.168.1.50":
+                    m.stdout = "   route to: 192.168.1.50\n    gateway: 192.168.1.1\n  interface: en0\n"
+                else:
+                    m.stdout = "   route to: 2001:db8::1\n  interface: en0\n"
+            elif cmd == ["arp", "-an"]:
+                m.stdout = arp_out
+            elif cmd == ["ndp", "-an"]:
+                m.stdout = ndp_out
+            else:
+                m.stdout = ""
+            return m
+
+        with patch.object(probe, "IS_DARWIN", True), \
+             patch("subprocess.run", side_effect=fake_run):
+            probe.MAC_RESOLUTION_CACHE.clear()
+            mac_v4 = probe.resolve_dst_mac("en0", "192.168.1.50", is_v6=False)
+            self.assertEqual(mac_v4, "00:11:22:33:44:55")
+
+            probe.MAC_RESOLUTION_CACHE.clear()
+            mac_v6 = probe.resolve_dst_mac("en0", "2001:db8::1", is_v6=True)
+            self.assertEqual(mac_v6, "00:11:22:33:44:55")
+
+    def test_darwin_iface_source_and_mac_resolution(self):
+        """Test Darwin ifconfig parsing for MAC, IPv4, and IPv6."""
+        ifconfig_out = """en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tether 00:11:22:aa:bb:cc
+\tinet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255
+\tinet6 fe80::100:200:300:400%en0 prefixlen 64 secured scopeid 0x6
+\tinet6 2001:db8::100 prefixlen 64 autoconf secured
+\tstatus: active
+"""
+        with patch.object(probe, "IS_DARWIN", True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=ifconfig_out)):
+            mac = probe.get_iface_mac("en0")
+            self.assertEqual(mac, "00:11:22:aa:bb:cc")
+
+            src_ip = probe.resolve_source_ip("en0")
+            self.assertEqual(src_ip, "192.168.1.100")
+
+            src_ip6 = probe.resolve_source_ipv6("en0", target_ip="2001:db8::1")
+            self.assertEqual(src_ip6, "2001:db8::100")
+
 
 if __name__ == "__main__":
     unittest.main()

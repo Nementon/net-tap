@@ -14,7 +14,64 @@
 #
 
 set -euo pipefail
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# --- Platform Detection ---
+PLATFORM="${NET_TAP_PLATFORM:-}"
+if [[ -z "${PLATFORM}" ]]; then
+    case "$(uname -s)" in
+        Darwin*) PLATFORM="darwin" ;;
+        Linux*)  PLATFORM="linux" ;;
+        *)       PLATFORM="linux" ;;
+    esac
+fi
+
+CORE_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [[ -f "${CORE_LIB_DIR}/platform_${PLATFORM}.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CORE_LIB_DIR}/platform_${PLATFORM}.sh"
+elif [[ -n "${LIB_DIR:-}" && -f "${LIB_DIR}/platform_${PLATFORM}.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${LIB_DIR}/platform_${PLATFORM}.sh"
+fi
+
+# --- Portable Utility Helpers ---
+resolve_path() {
+    local target="$1"
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "${target}"
+    elif command -v greadlink >/dev/null 2>&1; then
+        greadlink -f "${target}"
+    elif readlink -f "${target}" >/dev/null 2>&1; then
+        readlink -f "${target}"
+    else
+        python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${target}"
+    fi
+}
+
+file_stat_owner() {
+    platform_stat_owner "$1"
+}
+
+file_stat_perm() {
+    platform_stat_perm "$1"
+}
+
+file_stat_nlinks() {
+    platform_stat_nlinks "$1"
+}
+
+get_proc_starttime() {
+    platform_proc_starttime "$1"
+}
+
+get_proc_comm() {
+    platform_proc_comm "$1"
+}
+
+get_proc_cmdline() {
+    platform_proc_cmdline "$1"
+}
 
 # --- Default Settings ---
 DEFAULT_OUT_DIR="./captures"
@@ -65,18 +122,9 @@ log_err()   {
     _syslog "ERROR" "$*"
 }
 
-# --- Carrier-Grade Verifications ---
+# --- Dependency Verification ---
 verify_dependencies() {
-    local missing=()
-    for cmd in ip tc tcpdump ethtool awk dmesg grep sed find ss df du mktemp readlink gzip flock sysctl stat date python3; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing+=("$cmd")
-        fi
-    done
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        log_err "Missing required dependencies: ${missing[*]}"
-        exit 1
-    fi
+    platform_verify_dependencies
 }
 
 verify_disk_space() {
@@ -105,6 +153,10 @@ require_root() {
     if [[ $EUID -eq 0 ]]; then
         return 0
     fi
+    if [[ "${PLATFORM}" == "darwin" ]]; then
+        log_err "This operation requires root privileges on macOS. Please run with sudo."
+        exit 1
+    fi
     if command -v capsh >/dev/null 2>&1; then
         if [[ -n "${NETNS:-}" ]]; then
             if capsh --has-p=cap_net_admin 2>/dev/null && capsh --has-p=cap_net_raw 2>/dev/null && capsh --has-p=cap_sys_admin 2>/dev/null; then
@@ -132,15 +184,15 @@ load_state_file() {
         return 1
     fi
     local real_sfile real_sdir
-    real_sfile=$(readlink -f "${sfile}" 2>/dev/null || true)
-    real_sdir=$(readlink -f "${STATE_DIR}" 2>/dev/null || true)
+    real_sfile=$(resolve_path "${sfile}" 2>/dev/null || true)
+    real_sdir=$(resolve_path "${STATE_DIR}" 2>/dev/null || true)
     if [[ -z "${real_sfile}" || -z "${real_sdir}" || "${real_sfile}" != "${real_sdir}"/* ]]; then
         log_err "Security violation: State file '${sfile}' resolves outside STATE_DIR (${STATE_DIR})."
         return 1
     fi
     local sdir_owner sdir_perm
-    sdir_owner=$(stat -c "%u" "${real_sdir}" 2>/dev/null || echo "-1")
-    sdir_perm=$(stat -c "%a" "${real_sdir}" 2>/dev/null || echo "777")
+    sdir_owner=$(file_stat_owner "${real_sdir}")
+    sdir_perm=$(file_stat_perm "${real_sdir}")
     if [[ "${sdir_owner}" -ne 0 && "${sdir_owner}" -ne "${EUID}" && "${sdir_owner}" -ne "${SUDO_UID:-0}" ]]; then
         log_err "Security violation: STATE_DIR '${real_sdir}' is not owned by root (UID 0) or current user."
         return 1
@@ -150,7 +202,7 @@ load_state_file() {
         return 1
     fi
     local file_owner perm
-    file_owner=$(stat -c "%u" "${sfile}" 2>/dev/null || echo "-1")
+    file_owner=$(file_stat_owner "${sfile}")
     if [[ "${EUID}" -eq 0 ]]; then
         if [[ "${file_owner}" -ne 0 && "${file_owner}" -ne "${SUDO_UID:-0}" ]]; then
             log_err "Security violation: State file '${sfile}' must be owned by root (UID 0) or invoking user (${SUDO_UID:-0})."
@@ -162,12 +214,12 @@ load_state_file() {
             return 1
         fi
     fi
-    perm=$(stat -c "%a" "${sfile}" 2>/dev/null || echo "777")
+    perm=$(file_stat_perm "${sfile}")
     if [[ "${perm}" != "600" && "${perm}" != "640" && "${perm}" != "644" && "${perm}" != "400" && "${perm}" != "440" && "${perm}" != "444" ]]; then
         log_err "Security violation: State file '${sfile}' has unsafe permissions (${perm})."
         return 1
     fi
-    if [[ $(stat -c "%h" "${sfile}" 2>/dev/null || echo "0") -ne 1 ]]; then
+    if [[ $(file_stat_nlinks "${sfile}") -ne 1 ]]; then
         log_err "Security violation: State file '${sfile}' has multiple hard links."
         return 1
     fi
@@ -206,16 +258,8 @@ load_state_file() {
         return 1
     fi
     # Ensure critical execution PATH cannot be hijacked
-    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     return 0
-}
-
-# --- Process Metadata Helper ---
-get_proc_starttime() {
-    local pid="$1"
-    [[ -z "${pid}" || ! -d "/proc/${pid}" ]] && return 0
-    # Field 22 in /proc/[pid]/stat represents process start time after system boot in clock ticks
-    awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null || echo ""
 }
 
 # --- Safe Process Termination Helper ---
@@ -243,14 +287,14 @@ safe_kill() {
 
     if kill -0 "${target_pid}" 2>/dev/null; then
         local actual_comm
-        actual_comm=$(cat "/proc/${target_pid}/comm" 2>/dev/null || echo "")
+        actual_comm=$(get_proc_comm "${target_pid}")
         if ! echo "${actual_comm}" | grep -qE "^(${expected_comm})$"; then
             log_warn "PID ${target_pid} comm '${actual_comm}' did not match expected '${expected_comm}'. Skipping termination."
             return 0
         fi
         if [[ -n "${expected_cmd}" ]]; then
             local actual_cmd
-            actual_cmd=$(tr '\0' ' ' < "/proc/${target_pid}/cmdline" 2>/dev/null || echo "")
+            actual_cmd=$(get_proc_cmdline "${target_pid}")
             if ! echo "${actual_cmd}" | grep -qE "${expected_cmd}"; then
                 log_warn "PID ${target_pid} cmdline did not match expected pattern '${expected_cmd}'. Skipping termination."
                 return 0
@@ -272,14 +316,14 @@ safe_kill() {
         # Re-verify process identity and starttime before SIGKILL to defend against PID recycling
         if kill -0 "${target_pid}" 2>/dev/null; then
             local verify_comm
-            verify_comm=$(cat "/proc/${target_pid}/comm" 2>/dev/null || echo "")
+            verify_comm=$(get_proc_comm "${target_pid}")
             if ! echo "${verify_comm}" | grep -qE "^(${expected_comm})$"; then
                 log_warn "PID ${target_pid} identity changed during shutdown (new comm: '${verify_comm}'). Skipping SIGKILL to avoid killing recycled process."
                 return 0
             fi
             if [[ -n "${expected_cmd}" ]]; then
                 local verify_cmd
-                verify_cmd=$(tr '\0' ' ' < "/proc/${target_pid}/cmdline" 2>/dev/null || echo "")
+                verify_cmd=$(get_proc_cmdline "${target_pid}")
                 if ! echo "${verify_cmd}" | grep -qE "${expected_cmd}"; then
                     log_warn "PID ${target_pid} cmdline changed during shutdown. Skipping SIGKILL."
                     return 0
@@ -304,6 +348,7 @@ safe_kill() {
 
 # --- POSIX Session Lock Helpers ---
 declare -g -a HELD_LOCK_FDS=()
+declare -g -a HELD_LOCK_DIRS=()
 
 _close_fd() {
     local target_fd="$1"
@@ -317,17 +362,9 @@ acquire_lock() {
     mkdir -p "${STATE_DIR}"
     chmod 755 "${STATE_DIR}"
 
-    # Acquire master lock to serialize lock acquisitions
     local master_lock="${STATE_DIR}/.lock_master"
     if [[ -L "${master_lock}" ]]; then
         log_err "Security violation: Master lock '${master_lock}' is a symlink!"
-        exit 1
-    fi
-    local master_fd
-    exec {master_fd}>>"${master_lock}"
-    if ! flock -x -w 10 "${master_fd}"; then
-        _close_fd "${master_fd}"
-        log_err "Could not acquire master lock on ${master_lock} within 10s."
         exit 1
     fi
 
@@ -344,52 +381,106 @@ acquire_lock() {
         if_list=("${safe_target}")
     fi
 
-    if [[ ${#if_list[@]} -eq 0 ]]; then
-        local global_lockfile="${STATE_DIR}/.lock_${lock_prefix}global"
-        if [[ -L "${global_lockfile}" ]]; then
-            log_err "Security violation: Lock file '${global_lockfile}' is a symlink!"
-            flock -u "${master_fd}" 2>/dev/null || true
+    if command -v flock >/dev/null 2>&1 && [[ -z "${NET_TAP_NO_FLOCK:-}" ]]; then
+        local master_fd
+        exec {master_fd}>>"${master_lock}"
+        if ! flock -x -w 10 "${master_fd}"; then
             _close_fd "${master_fd}"
+            log_err "Could not acquire master lock on ${master_lock} within 10s."
             exit 1
         fi
-        local g_fd
-        exec {g_fd}>>"${global_lockfile}"
-        if ! flock -x -w 10 "${g_fd}"; then
-            _close_fd "${g_fd}"
-            flock -u "${master_fd}" 2>/dev/null || true
-            _close_fd "${master_fd}"
-            release_lock
-            log_err "Could not acquire global session lock."
-            exit 1
-        fi
-        HELD_LOCK_FDS+=("${g_fd}")
-    else
-        for dev in "${if_list[@]}"; do
-            local dev_lockfile="${STATE_DIR}/.lock_${lock_prefix}${dev}"
-            if [[ -L "${dev_lockfile}" ]]; then
-                log_err "Security violation: Lock file '${dev_lockfile}' is a symlink!"
-                flock -u "${master_fd}" 2>/dev/null || true
-                _close_fd "${master_fd}"
-                release_lock
-                exit 1
-            fi
-            local d_fd
-            exec {d_fd}>>"${dev_lockfile}"
-            if ! flock -x -n "${d_fd}"; then
-                _close_fd "${d_fd}"
-                flock -u "${master_fd}" 2>/dev/null || true
-                _close_fd "${master_fd}"
-                log_err "Constituent interface '${dev}' is currently locked by another active session."
-                release_lock
-                exit 1
-            fi
-            HELD_LOCK_FDS+=("${d_fd}")
-        done
-    fi
 
-    # Release master lock now that specific device locks are held
-    flock -u "${master_fd}" 2>/dev/null || true
-    _close_fd "${master_fd}"
+        if [[ ${#if_list[@]} -eq 0 ]]; then
+            local global_lockfile="${STATE_DIR}/.lock_${lock_prefix}global"
+            if [[ -L "${global_lockfile}" ]]; then
+                log_err "Security violation: Lock file '${global_lockfile}' is a symlink!"
+                flock -u "${master_fd}" 2>/dev/null || true
+                _close_fd "${master_fd}"
+                exit 1
+            fi
+            local g_fd
+            exec {g_fd}>>"${global_lockfile}"
+            if ! flock -x -w 10 "${g_fd}"; then
+                _close_fd "${g_fd}"
+                flock -u "${master_fd}" 2>/dev/null || true
+                _close_fd "${master_fd}"
+                release_lock
+                log_err "Could not acquire global session lock."
+                exit 1
+            fi
+            HELD_LOCK_FDS+=("${g_fd}")
+        else
+            for dev in "${if_list[@]}"; do
+                local dev_lockfile="${STATE_DIR}/.lock_${lock_prefix}${dev}"
+                if [[ -L "${dev_lockfile}" ]]; then
+                    log_err "Security violation: Lock file '${dev_lockfile}' is a symlink!"
+                    flock -u "${master_fd}" 2>/dev/null || true
+                    _close_fd "${master_fd}"
+                    release_lock
+                    exit 1
+                fi
+                local d_fd
+                exec {d_fd}>>"${dev_lockfile}"
+                if ! flock -x -n "${d_fd}"; then
+                    _close_fd "${d_fd}"
+                    flock -u "${master_fd}" 2>/dev/null || true
+                    _close_fd "${master_fd}"
+                    log_err "Constituent interface '${dev}' is currently locked by another active session."
+                    release_lock
+                    exit 1
+                fi
+                HELD_LOCK_FDS+=("${d_fd}")
+            done
+        fi
+
+        flock -u "${master_fd}" 2>/dev/null || true
+        _close_fd "${master_fd}"
+    else
+        # Directory-based atomic locking fallback for macOS Darwin when util-linux flock is absent
+        local master_dir="${master_lock}.lockdir"
+        local start_t
+        start_t=$(date +%s)
+        while ! mkdir "${master_dir}" 2>/dev/null; do
+            local now_t
+            now_t=$(date +%s)
+            if (( now_t - start_t >= 10 )); then
+                log_err "Could not acquire directory master lock within 10s."
+                exit 1
+            fi
+            sleep 0.1
+        done
+
+        if [[ ${#if_list[@]} -eq 0 ]]; then
+            local global_lockdir="${STATE_DIR}/.lock_${lock_prefix}global.lockdir"
+            local g_start_t
+            g_start_t=$(date +%s)
+            while ! mkdir "${global_lockdir}" 2>/dev/null; do
+                local g_now_t
+                g_now_t=$(date +%s)
+                if (( g_now_t - g_start_t >= 10 )); then
+                    rmdir "${master_dir}" 2>/dev/null || true
+                    release_lock
+                    log_err "Could not acquire global session lock."
+                    exit 1
+                fi
+                sleep 0.1
+            done
+            HELD_LOCK_DIRS+=("${global_lockdir}")
+        else
+            for dev in "${if_list[@]}"; do
+                local dev_lockdir="${STATE_DIR}/.lock_${lock_prefix}${dev}.lockdir"
+                if ! mkdir "${dev_lockdir}" 2>/dev/null; then
+                    rmdir "${master_dir}" 2>/dev/null || true
+                    log_err "Constituent interface '${dev}' is currently locked by another active session."
+                    release_lock
+                    exit 1
+                fi
+                HELD_LOCK_DIRS+=("${dev_lockdir}")
+            done
+        fi
+
+        rmdir "${master_dir}" 2>/dev/null || true
+    fi
 }
 
 release_lock() {
@@ -398,6 +489,10 @@ release_lock() {
         _close_fd "${fd}"
     done
     HELD_LOCK_FDS=()
+    for ldir in ${HELD_LOCK_DIRS[@]+"${HELD_LOCK_DIRS[@]}"}; do
+        rmdir "${ldir}" 2>/dev/null || true
+    done
+    HELD_LOCK_DIRS=()
 }
 
 # --- Usage Banner ---
@@ -418,7 +513,7 @@ Commands:
 
 Options:
   -i, --interface <iface>   Target network interface (required for on, off, status, probe; optional for list, clean).
-  -n, --netns <name>        Target Linux network namespace to run the capture in.
+  -n, --netns <name>        Target Linux network namespace to run the capture in (Linux only).
   -m, --mode <mode>         Operational mode: 'passive' (zero-egress) or 'active' (audit probes permitted).
   -t, --type <type>         Hardware type: 'ethernet' or 'sfp' (default: ${DEFAULT_HW_TYPE}).
   -o, --output-dir <path>   Directory to store or read logs/captures (default: ${DEFAULT_OUT_DIR}).
@@ -482,6 +577,10 @@ EOF
 # --- Network Namespace Helper ---
 cmd_netns() {
     if [[ -n "${NETNS:-}" ]]; then
+        if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+            log_err "Network namespaces (-n / --netns) are not supported on macOS."
+            exit 1
+        fi
         ip netns exec "${NETNS}" "$@"
     else
         "$@"

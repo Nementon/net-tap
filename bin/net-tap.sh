@@ -8,6 +8,18 @@ set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 set +m
 
+# Check GNU Bash version requirement
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "ERROR: Bash version ${BASH_VERSION} is not supported. net-tap requires GNU Bash >= 4.3." >&2
+    if [[ "$(uname -s)" == "Darwin"* ]]; then
+        echo "On macOS, install modern Bash via Homebrew: brew install bash" >&2
+        echo "Then run net-tap using: /opt/homebrew/bin/bash (or /usr/local/bin/bash)" >&2
+    fi
+    exit 1
+fi
+
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # Resolve the absolute path to the directory containing this script
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -27,12 +39,34 @@ else
     exit 1
 fi
 
-LIB_DIR=$(readlink -f "${LIB_DIR}")
+_early_resolve_path() {
+    local target="$1"
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "${target}"
+    elif command -v greadlink >/dev/null 2>&1; then
+        greadlink -f "${target}"
+    elif readlink -f "${target}" >/dev/null 2>&1; then
+        readlink -f "${target}"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${target}"
+    else
+        echo "${target}"
+    fi
+}
+
+LIB_DIR=$(_early_resolve_path "${LIB_DIR}")
 
 if [[ $EUID -eq 0 ]]; then
-    lib_owner=$(stat -c "%u" "${LIB_DIR}" 2>/dev/null || echo "-1")
-    lib_perm=$(stat -c "%a" "${LIB_DIR}" 2>/dev/null || echo "777")
-    script_owner=$(stat -c "%u" "${SCRIPT_DIR}" 2>/dev/null || echo "-1")
+    if [[ "$(uname -s)" == "Darwin"* ]]; then
+        lib_owner=$(stat -f "%u" "${LIB_DIR}" 2>/dev/null || echo "-1")
+        lib_perm=$(stat -f "%OLp" "${LIB_DIR}" 2>/dev/null || echo "777")
+        lib_perm="${lib_perm#0}"
+        script_owner=$(stat -f "%u" "${SCRIPT_DIR}" 2>/dev/null || echo "-1")
+    else
+        lib_owner=$(stat -c "%u" "${LIB_DIR}" 2>/dev/null || echo "-1")
+        lib_perm=$(stat -c "%a" "${LIB_DIR}" 2>/dev/null || echo "777")
+        script_owner=$(stat -c "%u" "${SCRIPT_DIR}" 2>/dev/null || echo "-1")
+    fi
     if [[ "${lib_owner}" -ne 0 && "${lib_owner}" -ne "${SUDO_UID:-0}" && "${lib_owner}" -ne "${script_owner}" && "${lib_owner}" -ne "${EUID}" ]] || [[ "${lib_perm: -1}" =~ [2367] ]]; then
         echo "ERROR: Untrusted library directory '${LIB_DIR}' must be owned by root (or invoking user) and not writable by other users!" >&2
         exit 1
@@ -90,7 +124,7 @@ main() {
     PROBE_DEI=""
     PROBE_QINQ_TPID=""
 
-    SCRIPT_PATH=$(readlink -f "$0")
+    SCRIPT_PATH=$(resolve_path "$0")
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -329,6 +363,10 @@ main() {
     done
 
     if [[ -n "${NETNS}" ]]; then
+        if [[ "${PLATFORM}" == "darwin" ]]; then
+            log_err "Network namespaces (-n / --netns) are not supported on macOS (Darwin lacks network namespaces)."
+            exit 1
+        fi
         if [[ "${NETNS}" =~ ^- ]] || ! [[ "${NETNS}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
             log_err "Invalid network namespace name format: '${NETNS}'"
             exit 1
@@ -360,7 +398,7 @@ main() {
             log_err "Security violation: Output directory '${OUT_DIR}' cannot be a symlink."
             exit 1
         fi
-        OUT_DIR=$(readlink -m "${OUT_DIR}")
+        OUT_DIR=$(resolve_path "${OUT_DIR}")
     fi
     if [[ -n "${SPEED}" ]] && ! [[ "${SPEED}" =~ ^[1-9][0-9]*$ ]]; then
         log_err "Speed must be a positive integer in Mbps."
@@ -380,6 +418,10 @@ main() {
     fi
     if [[ "${HW_TYPE}" != "ethernet" && "${HW_TYPE}" != "sfp" ]]; then
         log_err "Hardware type must be 'ethernet' or 'sfp'."
+        exit 1
+    fi
+    if [[ "${HW_TYPE}" == "sfp" && "${PLATFORM}" == "darwin" ]]; then
+        log_err "Optical SFP/QSFP DDM telemetry (-t sfp) is not supported on macOS (Darwin DriverKit does not expose SFP I2C registers)."
         exit 1
     fi
     if [[ "${MODE}" != "passive" && "${MODE}" != "active" ]]; then

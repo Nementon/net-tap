@@ -149,6 +149,7 @@ main() {
     EXEC_QINQ=""
     EXEC_IP=""
     EXEC_IP6=""
+    EXEC_GATEWAY=""
     EXEC_PCP="7"
     EXEC_DSCP="CS7"
     EXEC_MARK="0x7a9"
@@ -404,6 +405,11 @@ main() {
                 EXEC_IP6="$2"
                 shift 2
                 ;;
+            --gateway)
+                if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
+                EXEC_GATEWAY="$2"
+                shift 2
+                ;;
             --mark)
                 if [[ $# -lt 2 ]]; then log_err "Missing argument for $1"; usage 1; fi
                 EXEC_MARK="$2"
@@ -650,6 +656,18 @@ main() {
         if [[ -n "${EXEC_IP}" ]]; then
             if ! [[ "${EXEC_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
                 log_err "Invalid IP address format: '${EXEC_IP}'."
+                exit 1
+            fi
+        fi
+        if [[ -n "${EXEC_IP6}" ]]; then
+            if ! [[ "${EXEC_IP6}" =~ ^[0-9a-fA-F:]+(/[0-9]{1,3})?$ ]]; then
+                log_err "Invalid IPv6 address format: '${EXEC_IP6}'."
+                exit 1
+            fi
+        fi
+        if [[ -n "${EXEC_GATEWAY}" ]]; then
+            if ! [[ "${EXEC_GATEWAY}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+                log_err "Invalid gateway IP address format: '${EXEC_GATEWAY}'."
                 exit 1
             fi
         fi

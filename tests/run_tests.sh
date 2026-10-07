@@ -307,6 +307,8 @@ assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" exec -i 
 assert_fail "QinQ tags must be in format 's_tag,c_tag'" "$BIN_PATH" exec -i lo --qinq badqinq -- true
 assert_fail "PCP must be an integer between 0 and 7" "$BIN_PATH" exec -i lo --pcp 8 -- true
 assert_fail "Invalid IP address format" "$BIN_PATH" exec -i lo --ip notanip -- true
+assert_fail "Invalid IPv6 address format" "$BIN_PATH" exec -i lo --ip6 notanip6 -- true
+assert_fail "Invalid gateway IP address format" "$BIN_PATH" exec -i lo --gateway notagateway -- true
 assert_fail "No active tap session found on 'lo'" "$BIN_PATH" exec -i lo -- true
 
 TMP_SYM_DIR=$(mktemp -d /tmp/net-tap-symtest.XXXXXX)
@@ -966,6 +968,62 @@ except jsonschema.ValidationError:
             FAILED=$((FAILED + 1))
         fi
 
+        echo -n "[TEST] Validating schema rejection of negative watermarked_egress_frames... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged'],
+    'discovered_hosts': [],
+    'watermarked_egress_frames': -1
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject negative watermarked_egress_frames)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema rejection of invalid datapath_profile in exec_sessions... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged'],
+    'discovered_hosts': [],
+    'exec_sessions': [
+        {'session_id': 's1', 'command': 'curl', 'datapath_profile': 'invalid_profile', 'exit_code': 0, 'vlan': None}
+    ]
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject invalid datapath_profile in exec_sessions)"
+            FAILED=$((FAILED + 1))
+        fi
+
         # Corrupt and Truncated PCAP Handling Tests
         echo -n "[TEST] Verifying analyzer resilience against corrupted PCAP input... "
         TEST_CORRUPT_DIR=$(mktemp -d /tmp/net-tap-test-corrupt.XXXXXX)
@@ -1575,7 +1633,7 @@ sniff(iface='veth-peer', timeout=60, prn=process_pkt, started_callback=on_starte
     fi
 
     echo -n "[TEST] Verifying net-tap exec stateless VLAN tagging (--stateless-vlan --vlan 200)... "
-    if "$BIN_PATH" exec -n "${TEST_NS}" -i veth-tap --stateless-vlan --vlan 200 -- python3 -c "import sys; sys.exit(0)" >/dev/null 2>&1; then
+    if "$BIN_PATH" exec -n "${TEST_NS}" -i veth-tap --no-drop-privileges --stateless-vlan --vlan 200 -- python3 -c "import socket; s=socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind(('veth-tap', 0)); s.send(b'\xff'*6 + b'\x02\x00\x00\x11\x22\x33' + b'\x08\x00' + b'NETTAPTAPTEST'*4)" >/dev/null 2>&1; then
         echo "PASSED"
         PASSED=$((PASSED + 1))
     else
@@ -1614,6 +1672,9 @@ try:
     assert len(hosts) >= 3, f"discovered_hosts len {len(hosts)} not >= 3: {hosts}"
     discovered_ips = [h.get("ip") for h in hosts]
     assert "2001:db8::1" in discovered_ips, "2001:db8::1 not in discovered_ips"
+    assert "exec_sessions" in audit, "exec_sessions not in audit"
+    assert len(audit.get("exec_sessions", [])) >= 3, "exec_sessions len < 3"
+    assert audit.get("watermarked_egress_frames", 0) > 0, "watermarked_egress_frames not > 0"
     sys.exit(0)
 except Exception as e:
     sys.stderr.write(f"Validation failed: {type(e).__name__}: {e}\n")
@@ -2131,6 +2192,53 @@ BASH_VER_TEST=$(bash -c '
     fi
 ')
 if [[ "${BASH_VER_TEST}" == "VALIDATED" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+# 7.18 Darwin Exec PF Group Rule Synthesis
+echo -n "[TEST] Verifying Darwin Exec PF rule synthesis (tos 0x38 & group)... "
+DARWIN_EXEC_PF_TEST=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/core.sh' 2>/dev/null || true
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh' 2>/dev/null || true
+    pfctl() {
+        if [[ \"\$1\" == \"-a\" && \"\$3\" == \"-f\" ]]; then
+            cat
+        fi
+        return 0
+    }
+    darwin_setup_exec_pf_group 'en0' '_nettap_active' 'vlan100'
+")
+if echo "${DARWIN_EXEC_PF_TEST}" | grep -q "tos 0x38" && echo "${DARWIN_EXEC_PF_TEST}" | grep -q "group _nettap_active"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+# 7.19 Darwin Exec VLAN Interface Creation and Destruction
+echo -n "[TEST] Verifying Darwin Exec VLAN interface creation and teardown... "
+DARWIN_EXEC_VLAN_TEST=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/core.sh' 2>/dev/null || true
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh' 2>/dev/null || true
+    TMPF=\$(mktemp)
+    ifconfig() {
+        echo \"\$*\" >> \"\${TMPF}\"
+        return 0
+    }
+    v_dev=\$(darwin_setup_exec_vlan 'en0' '200')
+    darwin_teardown_exec_vlan \"\${v_dev}\"
+    lines=\$(cat \"\${TMPF}\")
+    rm -f \"\${TMPF}\"
+    if [[ \"\${v_dev}\" == 'vlan200' ]] && echo \"\${lines}\" | grep -q 'vlan200 create' && echo \"\${lines}\" | grep -q 'vlan200 destroy'; then
+        echo 'VALIDATED'
+    fi
+")
+if [[ "${DARWIN_EXEC_VLAN_TEST}" == "VALIDATED" ]]; then
     echo "PASSED"
     PASSED=$((PASSED + 1))
 else

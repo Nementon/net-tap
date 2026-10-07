@@ -48,6 +48,7 @@
 #endif
 
 static int (*real_socket)(int domain, int type, int protocol) = NULL;
+static __thread int in_socket_interpose = 0;
 
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 static uint32_t g_mark = 0x7a9;             /* Default SO_MARK: 1961 */
@@ -79,7 +80,10 @@ static void init_watermark(void) {
     if (env_if && *env_if) {
         strncpy(g_bound_if, env_if, sizeof(g_bound_if) - 1);
         g_bound_if[sizeof(g_bound_if) - 1] = '\0';
+        /* Guard against re-entry during if_nametoindex libc internal socket creation */
+        in_socket_interpose = 1;
         g_bound_ifindex = if_nametoindex(g_bound_if);
+        in_socket_interpose = 0;
     }
 
     const char *env_verb = getenv("NETTAP_WATERMARK_VERBOSE");
@@ -91,11 +95,20 @@ static void init_watermark(void) {
 }
 
 int socket(int domain, int type, int protocol) {
+    if (in_socket_interpose) {
+        if (!real_socket) {
+            real_socket = (int (*)(int, int, int))dlsym(RTLD_NEXT, "socket");
+        }
+        return real_socket ? real_socket(domain, type, protocol) : -1;
+    }
+
+    in_socket_interpose = 1;
     pthread_once(&g_init_once, init_watermark);
 
     int saved_errno = 0;
     int fd = real_socket(domain, type, protocol);
     if (fd < 0) {
+        in_socket_interpose = 0;
         return fd;
     }
 
@@ -120,7 +133,7 @@ int socket(int domain, int type, int protocol) {
 
         /* Linux: Optional device binding if requested */
         if (g_bound_if[0] != '\0') {
-            if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, g_bound_if, strlen(g_bound_if)) < 0) {
+            if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, g_bound_if, strlen(g_bound_if) + 1) < 0) {
                 if (g_verbose) {
                     fprintf(stderr, "[net-tap-watermark] Warning: setsockopt(SO_BINDTODEVICE) failed: %s\n", strerror(errno));
                 }
@@ -150,5 +163,6 @@ int socket(int domain, int type, int protocol) {
 
     /* Restore original socket errno so callers receive authentic status */
     errno = saved_errno;
+    in_socket_interpose = 0;
     return fd;
 }

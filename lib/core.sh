@@ -628,6 +628,7 @@ Exec Options (for 'exec' command):
   --qinq <s-tag,c-tag>      Force IEEE 802.1ad QinQ double-tagging (stateless tc act_vlan).
   --ip <cidr>               Assign static IPv4 address/mask to virtual interface in netns (e.g. 192.168.1.50/24).
   --ip6 <cidr>              Assign static IPv6 address/prefix to virtual interface in netns.
+  --gateway <ip>            Configure default gateway inside isolated netns (e.g. 192.168.1.1).
   --pcp <0-7>               IEEE 802.1p Priority Code Point for VLAN tag (default: 7).
   --dscp <class|num>        Wire watermark DSCP class (e.g. CS7, 0x38; default: CS7).
   --mark <hex>              Internal firewall watermark value (default: 0x7a9).

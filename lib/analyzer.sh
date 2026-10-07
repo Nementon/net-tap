@@ -1462,8 +1462,9 @@ current_src_mac = None
 if os.path.exists(dump_path):
     with open(dump_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            # Check for start of new packet (unindented line)
-            if not line.startswith(" ") and not line.startswith("\t"):
+            is_new_pkt = not line.startswith(" ") and not line.startswith("\t")
+            if is_new_pkt:
+                current_pkt_watermarked = False
                 # Extract Ethernet MAC addresses from packet header
                 mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>\s+([0-9a-fA-F:]{17})", line)
                 if mac_m:
@@ -1481,18 +1482,19 @@ if os.path.exists(dump_path):
                 else:
                     current_vlan = "untagged"
 
+                if current_vlan != "untagged":
+                    try:
+                        v_num = str(int(current_vlan.split(",")[0].split("/")[0]))
+                        vlan_tagged_frames[v_num] = vlan_tagged_frames.get(v_num, 0) + 1
+                    except Exception:
+                        pass
+
             pkt_vlan = current_vlan
 
-            # Check for watermarked frames (TOS 0x38 / CS7, Flow Label 0x7a9 / 0x007a9)
-            if re.search(r"(tos 0x38|tos 56|class 0x38|dscp 56|flowlabel 0x007a9|flowlabel 0x7a9|\[tos 0x38\]|dscp CS7)", line, re.I):
+            # Check for watermarked frames (TOS 0x38 / CS7, Flow Label 0x7a9 / 0x007a9, TC 56)
+            if not current_pkt_watermarked and re.search(r"(tos 0x38|tos 56|class 0x38|tc 56|traffic class 0x38|dscp 56|flowlabel 0x007a9|flowlabel 0x7a9|\[tos 0x38\]|dscp CS7)", line, re.I):
                 watermarked_egress_frames += 1
-
-            if pkt_vlan != "untagged":
-                try:
-                    v_num = str(int(pkt_vlan.split(",")[0].split("/")[0]))
-                    vlan_tagged_frames[v_num] = vlan_tagged_frames.get(v_num, 0) + 1
-                except Exception:
-                    pass
+                current_pkt_watermarked = True
 
             # Check ARP replies
             arp_match = re.search(r"Reply\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+is-at\s+([0-9a-fA-F:]{17})", line)

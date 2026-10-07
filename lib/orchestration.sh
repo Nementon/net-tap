@@ -1402,18 +1402,16 @@ _exec_supervisor_loop() {
     trap '_forward_signal HUP' HUP
     trap '_forward_signal QUIT' QUIT
 
-    # Launch child runner in dedicated process group if setsid is available
-    if command -v setsid >/dev/null 2>&1; then
-        setsid "${target_runner[@]}" &
+    # Launch child runner (enrolling in cgroup in pre-exec subshell if applicable)
+    if [[ -n "${cgroup_dir:-}" && -f "${cgroup_dir}/cgroup.procs" ]]; then
+        (
+            echo "$BASHPID" > "${cgroup_dir}/cgroup.procs" 2>/dev/null || true
+            exec "${target_runner[@]}"
+        ) &
         child_pid=$!
     else
         "${target_runner[@]}" &
         child_pid=$!
-    fi
-
-    # Attach child to cgroup if directory exists
-    if [[ -n "${cgroup_dir:-}" && -f "${cgroup_dir}/cgroup.procs" ]]; then
-        echo "${child_pid}" > "${cgroup_dir}/cgroup.procs" 2>/dev/null || true
     fi
 
     # Supervise child execution and wait for completion
@@ -1548,7 +1546,7 @@ run_exec() {
                 log_ok "Configured stateless 802.1Q tc filter on '${IFACE}' (VLAN: ${EXEC_VLAN}, PCP: ${EXEC_PCP})."
             else
                 datapath_profile="stateful_netns"
-                exec_netns=$(linux_setup_exec_vlan_netns "${IFACE}" "${EXEC_VLAN}" "${exec_session_id}" "${EXEC_IP:-}" "${EXEC_IP6:-}")
+                exec_netns=$(linux_setup_exec_vlan_netns "${IFACE}" "${EXEC_VLAN}" "${exec_session_id}" "${EXEC_IP:-}" "${EXEC_IP6:-}" "${EXEC_GATEWAY:-}")
                 log_ok "Provisioned ephemeral network namespace '${exec_netns}' with sub-interface '${IFACE}.${EXEC_VLAN}' (VLAN ${EXEC_VLAN})."
             fi
         fi
@@ -1639,6 +1637,15 @@ run_exec() {
 
     runner_cmd+=("${EXEC_CMD[@]}")
 
+    if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
+        local first_cmd="${EXEC_CMD[0]:-}"
+        local resolved_cmd
+        resolved_cmd=$(command -v "${first_cmd}" 2>/dev/null || true)
+        if [[ "${resolved_cmd}" =~ ^/(System|usr/bin|bin|usr/sbin)/ ]]; then
+            log_warn "Target '${resolved_cmd}' is protected by macOS System Integrity Protection (SIP). DYLD_INSERT_LIBRARIES will be stripped by the kernel. Use Homebrew or local binaries for socket watermarking."
+        fi
+    fi
+
     log_info "Executing wrapped command under datapath profile '${datapath_profile}': ${EXEC_CMD[*]}"
 
     local child_exit=0
@@ -1651,9 +1658,11 @@ run_exec() {
         local qinq_val="${EXEC_QINQ:+$(printf '"%s"' "${EXEC_QINQ}")}"
         qinq_val="${qinq_val:-null}"
         local cmd_str="${EXEC_CMD[*]}"
+        cmd_str="${cmd_str//\\/\\\\}"
+        cmd_str="${cmd_str//\"/\\\"}"
         printf '{"timestamp":"%s","command":"%s","exit_code":%d,"datapath_profile":"%s","vlan":%s,"qinq":%s}\n' \
             "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")" \
-            "${cmd_str//\"/\\\"}" \
+            "${cmd_str}" \
             "${child_exit}" \
             "${datapath_profile}" \
             "${vlan_val}" \

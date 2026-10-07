@@ -184,10 +184,10 @@ darwin_setup_exec_pf_group() {
         iface_list="{ ${iface}, ${vlan_if} }"
     fi
 
-    # Synthesize pass rules for active net-tap GID and drop everything else
+    # Synthesize pass rules for active net-tap TOS 0x38 and GID, and drop everything else
     local pf_rules
-    pf_rules=$(printf "pass out quick on %s proto { tcp, udp, icmp, icmp6 } group %s\nblock drop out quick on %s all\n" \
-               "${iface_list}" "${group_name}" "${iface}")
+    pf_rules=$(printf "pass out quick on %s proto { tcp, udp, icmp, icmp6 } tos 0x38\npass out quick on %s proto { tcp, udp, icmp, icmp6 } group %s\nblock drop out quick on %s all\n" \
+               "${iface_list}" "${iface_list}" "${group_name}" "${iface}")
 
     echo "${pf_rules}" | pfctl -a "net_tap_${iface}" -f - 2>/dev/null || {
         log_warn "Failed to apply PF anchor rules for group ${group_name} on ${iface}."

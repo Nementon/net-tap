@@ -290,6 +290,7 @@ For field engineers, lab triage, and staging audits on Apple Silicon or Intel ma
 | `net-tap status` | **Unprivileged** (standard user on host; requires `sudo` or `CAP_SYS_ADMIN` for `-n <netns>`) | Live-reads carrier state, ethtool statistics, and capture directory file sizes without requiring elevated privileges. Querying an isolated network namespace via `-n <netns>` requires `CAP_SYS_ADMIN` to execute `ip netns exec`. |
 | `net-tap analyze` | **Unprivileged** (standard user) | Reads PCAP files and metadata logs offline; requires standard read permissions on the target directory and disk headroom in `${TMPDIR:-/tmp}` ($\ge \max(50\text{ MB}, 3 \times \text{total PCAP size})$). |
 | `net-tap probe` | **Root / Sudo** or **Linux Capabilities** (`CAP_NET_RAW` + `CAP_NET_ADMIN`; requires `CAP_SYS_ADMIN` if `-n <netns>` is used) | Binds raw `AF_PACKET` sockets, applies `SO_MARK 0x7a9`, crafts L2/L3 frames, and transmits active audit probes. |
+| `net-tap exec` | **Root / Sudo** or **Linux Capabilities** (`CAP_NET_ADMIN` + `CAP_NET_RAW`; requires `CAP_SYS_ADMIN` if `-n <netns>` or stateful netns VLAN is used) | Configures ephemeral cgroups, Netfilter mangle/raw rules, TC act_vlan filters, and executes target binary with socket watermarking. Automatically drops execution UID/GID to $SUDO_USER unless `--no-drop-privileges` is specified. |
 | `net-tap list` | **Unprivileged** (standard user on host; requires `sudo` or `CAP_SYS_ADMIN` for `-n <netns>`) | Enumerates running and stale monitoring sessions and background process PIDs across namespaces. |
 | `net-tap clean` | **Root / Sudo** or **Linux Capabilities** (`CAP_NET_ADMIN` + `CAP_NET_RAW` + `CAP_KILL`) | Reconciles crashed sessions, terminates orphaned processes, purges stale locks, and detaches dangling egress drop filters. |
 
@@ -308,7 +309,7 @@ sudo capsh --user=$USER --inh=cap_net_admin,cap_net_raw,cap_sys_admin --addamb=c
 
 #### Privilege Model on macOS Darwin
 macOS does not support POSIX ambient capabilities (`capsh`).
-* `net-tap on`, `net-tap off`, `net-tap probe`, and `net-tap clean` **strictly require `sudo`** on macOS to configure `pfctl` anchors, toggle interface promiscuous mode, and bind `/dev/bpf*` character devices.
+* `net-tap on`, `net-tap off`, `net-tap probe`, `net-tap exec`, and `net-tap clean` **strictly require `sudo`** on macOS to configure `pfctl` anchors, toggle interface promiscuous mode, and bind `/dev/bpf*` character devices.
 * `net-tap status`, `net-tap analyze`, and `net-tap list` can be executed by standard unprivileged users.
 
 ---
@@ -471,15 +472,16 @@ net-tap [on|off|status|analyze|probe|exec|list|clean] [options]
 | `-i` | `--interface` | **(Required)** Target single network interface (must have active session with `--mode active`). | None | All |
 | `-n` | `--netns` | Target Linux network namespace (auto-discovered if omitted). | Host namespace | Linux only |
 | - | `--vlan` | Inject egress traffic tagged with IEEE 802.1Q VLAN ID (`1-4094`). Provisions isolated netns VLAN interface or stateless TC push. | Untagged | All |
-| - | `--stateless-vlan` | Enforce stateless TC `act_vlan` push on egress (Linux only) instead of provisioning a stateful netns VLAN interface. | Stateful (NetNS) | Linux only |
+| - | `--stateless-vlan`, `--raw` | Enforce stateless TC `act_vlan` push on egress (Linux only) instead of provisioning a stateful netns VLAN interface. | Stateful (NetNS) | Linux only |
 | - | `--qinq` | Inject egress traffic double-tagged with 802.1ad QinQ as `s_tag,c_tag` (`1-4094,1-4094`, e.g. `100,200`). | None | All |
-| - | `--pcp` | IEEE 802.1p Priority Code Point (`0-7`) for VLAN / QinQ tagged frames. | `0` | All |
-| - | `--dei` | Drop Eligible Indicator bit (`0` or `1`) for VLAN / QinQ tagged frames. | `0` | All |
+| - | `--pcp` | IEEE 802.1p Priority Code Point (`0-7`) for VLAN / QinQ tagged frames. | `7` (Network Control) | All |
 | - | `--mark` | Custom 32-bit socket mark / fwmark override. | `0x7a9` (1961) | Linux only |
-| - | `--dscp` | Custom DSCP / TOS classification override (`0-63`). | `56` (CS7 / TOS `0x38`) | All |
-| - | `--ip` | Ephemeral IP address and CIDR assigned to isolated execution interface (e.g. `192.168.1.50/24`). | None | Linux only |
+| - | `--dscp` | Custom DSCP / TOS classification override (`0-63` or `CS0`-`CS7`). | `56` (CS7 / TOS `0x38`) | All |
+| - | `--ip` | Ephemeral IPv4 address and CIDR assigned to isolated execution interface (e.g. `192.168.1.50/24`). | None | Linux only |
+| - | `--ip6` | Ephemeral IPv6 address and prefix assigned to isolated execution interface (e.g. `2001:db8::50/64`). | None | Linux only |
 | - | `--gateway` | Ephemeral default gateway IP configured in isolated execution environment (e.g. `192.168.1.1`). | None | Linux only |
-| - | `--auto-baby-giant`| Automatically adjust parent interface MTU (+4 bytes per VLAN tag, up to +8 for QinQ) to prevent frame truncation and local EMSGSIZE drops. | Auto | All |
+| - | `--auto-baby-giant`| Automatically adjust parent interface MTU (+4 bytes per VLAN tag, up to +8 for QinQ) to prevent frame truncation and local EMSGSIZE drops. | Disabled | All |
+| - | `--no-drop-privileges` | Maintain elevated root privileges; do not drop execution UID/GID to invoking `$SUDO_USER`. | Disabled (drops to user) | All |
 | `--` | `[cmd] [args...]`| **(Required)** Third-party command and arguments to execute under watermarking wrapper. | None | All |
 
 #### Options for `net-tap analyze`
@@ -1504,6 +1506,22 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
         "mac": "02:00:00:00:00:01",
         "vlan": "untagged"
       }
+    ],
+    "watermarked_egress_frames": 254,
+    "vlan_tagged_frames": {
+      "10": 128,
+      "20": 126
+    },
+    "exec_sessions": [
+      {
+        "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "timestamp": "2026-10-04T14:35:00Z",
+        "command": "iperf3 -c 10.100.1.1 -t 10",
+        "vlan": "100",
+        "datapath_profile": "stateful_netns",
+        "duration_seconds": 10.2,
+        "exit_code": 0
+      }
     ]
   }
 }
@@ -1525,6 +1543,7 @@ Every active capture session creates a predictable hierarchy of state, telemetry
 | `<dir>/<timestamp>_<iface>_tcpdump.log` | `tcpdump` | Standard error log capturing `tcpdump` initialization, packet drops at the socket buffer, and filter drop counts. |
 | `<dir>/<timestamp>_<iface>_sfp_ddm.txt` | `net-tap on` | Transceiver Digital Diagnostic Monitoring (DDM) report logging optical power (Rx/Tx dBm), laser bias, voltage, and temperature (SFP mode). |
 | `<dir>/<timestamp>_<iface>_probe_audit.jsonl` | `lib/probe.py` | Real-time JSON Lines audit trail of every transmitted active probe packet, recording timestamp, audit ID, probe type, sequence number, target, VLAN/QinQ tags, source/destination MAC, and protocol metadata. |
+| `<dir>/exec_audit.jsonl` | `net-tap exec` | Real-time JSON Lines telemetry log recording third-party command execution, session UUID, exit code, execution duration, datapath profile, and applied watermarks. |
 | `<dir>/<timestamp>_merged_trace.pcap` | `mergecap` | Chronologically merged dual-port trace combining bidirectional Tx/Rx feeds (created automatically when `-i <if0>,<if1>` is disarmed). |
 | `stdout` (via `net-tap analyze -j`) | `net-tap analyze` | RFC 8259 structured JSON document summarizing VLAN segmentation, MACs, dual-stack IP subnets, routing protocols, flow top talkers, and active probe correlations. |
 

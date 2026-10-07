@@ -118,15 +118,22 @@ linux_teardown_exec_cgroup() {
 
     [[ ! -d "${cgroup_dir}" ]] && return 0
 
+    # Ensure supervisor process ($$) is moved out of cgroup before freezing
+    if [[ -f "${cgroup_dir}/cgroup.procs" ]]; then
+        if grep -qx "$$" "${cgroup_dir}/cgroup.procs" 2>/dev/null; then
+            echo "$$" > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true
+        fi
+    fi
+
     # 1. Freeze remaining processes in cgroup
     if [[ -f "${cgroup_dir}/cgroup.freeze" ]]; then
         echo "1" > "${cgroup_dir}/cgroup.freeze" 2>/dev/null || true
     fi
 
-    # 2. Terminate any residual orphaned processes
+    # 2. Terminate any residual orphaned processes (excluding self)
     if [[ -f "${cgroup_dir}/cgroup.procs" ]]; then
         while read -r pid; do
-            if [[ -n "$pid" ]]; then
+            if [[ -n "$pid" && "$pid" -ne "$$" ]]; then
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done < "${cgroup_dir}/cgroup.procs"
@@ -192,6 +199,7 @@ linux_setup_exec_vlan_netns() {
     local session_id="$3"
     local ip_cidr="${4:-}"
     local ip6_cidr="${5:-}"
+    local gateway="${6:-}"
     local netns="nettap_exec_${session_id}_$$"
 
     ip netns add "${netns}"
@@ -205,6 +213,9 @@ linux_setup_exec_vlan_netns() {
     fi
     if [[ -n "${ip6_cidr}" ]]; then
         ip -n "${netns}" addr add "${ip6_cidr}" dev "${iface}.${vlan}" 2>/dev/null || true
+    fi
+    if [[ -n "${gateway}" ]]; then
+        ip -n "${netns}" route add default via "${gateway}" 2>/dev/null || true
     fi
 
     echo "${netns}"

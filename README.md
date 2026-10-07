@@ -1514,13 +1514,12 @@ Running `net-tap analyze -d <dir> --json` produces a standardized JSON document:
     },
     "exec_sessions": [
       {
-        "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "timestamp": "2026-10-04T14:35:00Z",
         "command": "iperf3 -c 10.100.1.1 -t 10",
-        "vlan": "100",
+        "exit_code": 0,
         "datapath_profile": "stateful_netns",
-        "duration_seconds": 10.2,
-        "exit_code": 0
+        "vlan": 100,
+        "qinq": null
       }
     ]
   }

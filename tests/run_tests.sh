@@ -306,7 +306,11 @@ assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" exec -i 
 assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" exec -i lo --qinq 5000,100 -- true
 assert_fail "QinQ tags must be in format 's_tag,c_tag'" "$BIN_PATH" exec -i lo --qinq badqinq -- true
 assert_fail "PCP must be an integer between 0 and 7" "$BIN_PATH" exec -i lo --pcp 8 -- true
+assert_fail "Invalid mark format" "$BIN_PATH" exec -i lo --mark badmark -- true
+assert_fail "Invalid DSCP format" "$BIN_PATH" exec -i lo --dscp baddscp -- true
 assert_fail "Invalid IP address format" "$BIN_PATH" exec -i lo --ip notanip -- true
+assert_fail "Invalid IP address or CIDR prefix length" "$BIN_PATH" exec -i lo --ip 10.0.0.1/99 -- true
+assert_fail "Invalid IP address or CIDR prefix length" "$BIN_PATH" exec -i lo --ip 999.1.1.1/24 -- true
 assert_fail "Invalid IPv6 address format" "$BIN_PATH" exec -i lo --ip6 notanip6 -- true
 assert_fail "Invalid gateway IP address format" "$BIN_PATH" exec -i lo --gateway notagateway -- true
 assert_fail "No active tap session found on 'lo'" "$BIN_PATH" exec -i lo -- true
@@ -2438,6 +2442,42 @@ else
     echo "FAILED"
     FAILED=$((FAILED + 1))
 fi
+
+# 8.7 Verifying symlink rejection on exec_audit.jsonl
+echo -n "[TEST] Verifying exec_audit.jsonl symlink rejection defense... "
+MOCK_EXEC_DIR=$(mktemp -d /tmp/net-tap-execsym.XXXXXX)
+ln -s /etc/passwd "${MOCK_EXEC_DIR}/exec_audit.jsonl"
+cat <<EOF > "${MOCK_EXEC_DIR}/symtest0.state"
+declare -- IFACE="symtest0"
+declare -- MODE="active"
+declare -- HW_TYPE="ethernet"
+declare -- TIMESTAMP="20261004_120000"
+declare -- NETNS=""
+declare -- ROTATE_SIZE="100"
+declare -- ROTATE_COUNT="10"
+declare -- OUT_DIR="${MOCK_EXEC_DIR}"
+declare -a PIDS_TCPDUMP=()
+declare -a PIDS_DMESG=()
+declare -a PIDS_IPMON=()
+declare -a PCAP_FILES=()
+declare -a DMESG_LOGS=()
+declare -a LINK_LOGS=()
+declare -a TCPDUMP_ERRS=()
+declare -a CONFIGURED_IFACES=()
+declare -- PID_WATCHDOG=""
+declare -- PID_AUTOSHUTDOWN=""
+EOF
+chmod 600 "${MOCK_EXEC_DIR}/symtest0.state"
+SYM_REJECT=$(STATE_DIR="${MOCK_EXEC_DIR}" "$BIN_PATH" exec -i symtest0 -- true 2>&1 || true)
+rm -rf "${MOCK_EXEC_DIR}"
+if echo "${SYM_REJECT}" | grep -q "cannot be a symlink"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
 
 echo "================================================="
 echo " Test Results: ${PASSED} Passed | ${FAILED} Failed"

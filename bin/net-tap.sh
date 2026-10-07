@@ -653,9 +653,25 @@ main() {
                 exit 1
             fi
         fi
+        if [[ -n "${EXEC_MARK}" ]]; then
+            if ! [[ "${EXEC_MARK}" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$ ]]; then
+                log_err "Invalid mark format: '${EXEC_MARK}'. Must be hex (e.g. 0x7a9) or integer."
+                exit 1
+            fi
+        fi
+        if [[ -n "${EXEC_DSCP}" ]]; then
+            if ! [[ "${EXEC_DSCP}" =~ ^(CS[0-7]|BE|cs[0-7]|be|0x[0-9a-fA-F]+|[0-9]+)$ ]]; then
+                log_err "Invalid DSCP format: '${EXEC_DSCP}'. Must be CS0-CS7, BE, hex, or integer."
+                exit 1
+            fi
+        fi
         if [[ -n "${EXEC_IP}" ]]; then
             if ! [[ "${EXEC_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
                 log_err "Invalid IP address format: '${EXEC_IP}'."
+                exit 1
+            fi
+            if ! python3 -B -c "import ipaddress, sys; ipaddress.IPv4Interface(sys.argv[1])" "${EXEC_IP}" 2>/dev/null; then
+                log_err "Invalid IP address or CIDR prefix length: '${EXEC_IP}'."
                 exit 1
             fi
         fi
@@ -664,10 +680,18 @@ main() {
                 log_err "Invalid IPv6 address format: '${EXEC_IP6}'."
                 exit 1
             fi
+            if ! python3 -B -c "import ipaddress, sys; ipaddress.IPv6Interface(sys.argv[1])" "${EXEC_IP6}" 2>/dev/null; then
+                log_err "Invalid IPv6 address or CIDR prefix length: '${EXEC_IP6}'."
+                exit 1
+            fi
         fi
         if [[ -n "${EXEC_GATEWAY}" ]]; then
             if ! [[ "${EXEC_GATEWAY}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
                 log_err "Invalid gateway IP address format: '${EXEC_GATEWAY}'."
+                exit 1
+            fi
+            if ! python3 -B -c "import ipaddress, sys; ipaddress.IPv4Address(sys.argv[1])" "${EXEC_GATEWAY}" 2>/dev/null; then
+                log_err "Invalid gateway IP address: '${EXEC_GATEWAY}'."
                 exit 1
             fi
         fi

@@ -106,9 +106,7 @@ linux_setup_exec_cgroup() {
     fi
 
     mkdir -p "${cgroup_dir}" 2>/dev/null || return 0
-    if [[ "${user_uid}" -ne 0 ]]; then
-        chown "${user_uid}:${user_gid}" "${cgroup_dir}/cgroup.procs" 2>/dev/null || true
-    fi
+    chmod 755 "${cgroup_dir}" 2>/dev/null || true
     echo "${cgroup_dir}"
 }
 
@@ -217,6 +215,10 @@ linux_setup_exec_vlan_netns() {
     if [[ -n "${gateway}" ]]; then
         ip -n "${netns}" route add default via "${gateway}" 2>/dev/null || true
     fi
+
+    # Apply internal mangle rules within namespace so packets inherit fwmark 0x7a9 regardless of unprivileged execution
+    ip netns exec "${netns}" iptables -t mangle -A OUTPUT -j MARK --set-mark 0x7a9 2>/dev/null || true
+    ip netns exec "${netns}" ip6tables -t mangle -A OUTPUT -j MARK --set-mark 0x7a9 2>/dev/null || true
 
     echo "${netns}"
 }

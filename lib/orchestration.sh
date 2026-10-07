@@ -734,13 +734,15 @@ start_tap() {
     SCRIPT_PATH="${SCRIPT_PATH:-$(resolve_path "$0")}"
     if [[ -n "${DURATION}" ]] && [[ "${DURATION}" =~ ^[0-9]+$ ]]; then
         log_info "Scheduling auto-shutdown in ${DURATION} seconds..."
-        ( _close_lock_fds; exec -a net-tap-autoshutdown "${BASH:-bash}" -c 'source "'"${LIB_DIR}"'/core.sh"; source "'"${LIB_DIR}"'/orchestration.sh"; _autoshutdown_worker "$@"' -- "${DURATION}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" ) >/dev/null 2>&1 &
+        # shellcheck disable=SC2016 # Expression parameters expand within invoked bash subshell
+        ( _close_lock_fds; exec -a net-tap-autoshutdown "${BASH:-bash}" -c 'source "$1/core.sh"; source "$1/orchestration.sh"; shift; _autoshutdown_worker "$@"' -- "${LIB_DIR}" "${DURATION}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" ) >/dev/null 2>&1 &
         PID_AUTOSHUTDOWN=$!
     fi
 
     local THRESH="${DISK_THRESH:-85}"
     log_info "Starting background disk watchdog (threshold: ${THRESH}%)..."
-    ( _close_lock_fds; exec -a net-tap-watchdog "${BASH:-bash}" -c 'source "'"${LIB_DIR}"'/core.sh"; source "'"${LIB_DIR}"'/orchestration.sh"; _disk_watchdog_worker "$@"' -- "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" "${TIMESTAMP}" ) >/dev/null 2>&1 &
+    # shellcheck disable=SC2016 # Expression parameters expand within invoked bash subshell
+    ( _close_lock_fds; exec -a net-tap-watchdog "${BASH:-bash}" -c 'source "$1/core.sh"; source "$1/orchestration.sh"; shift; _disk_watchdog_worker "$@"' -- "${LIB_DIR}" "${THRESH}" "${OUT_DIR}" "${IFACE}" "${NETNS}" "${SCRIPT_PATH}" "${STATE_FILE}" "${ROTATE_COUNT}" "${PIDS_TCPDUMP[*]}" "${TIMESTAMP}" ) >/dev/null 2>&1 &
     PID_WATCHDOG=$!
 
     # 8. Secure atomic state serialization
@@ -1446,6 +1448,14 @@ run_exec() {
 
     load_state_file "${STATE_FILE}"
 
+    if [[ -n "${OUT_DIR:-}" && -d "${OUT_DIR}" ]]; then
+        local audit_log_chk="${OUT_DIR}/exec_audit.jsonl"
+        if [[ -L "${audit_log_chk}" ]]; then
+            log_err "Security violation: Audit log '${audit_log_chk}' cannot be a symlink!"
+            exit 1
+        fi
+    fi
+
     if [[ "${MODE:-passive}" != "active" ]]; then
         log_err "Tap session on '${IFACE}' is running in PASSIVE mode (zero-egress stealth). Egress traffic cannot be transmitted. Start session with '--mode active' to permit watermarked execution."
         exit 1
@@ -1654,19 +1664,34 @@ run_exec() {
     # Record Telemetry Audit
     if [[ -n "${OUT_DIR:-}" && -d "${OUT_DIR}" ]]; then
         local audit_log="${OUT_DIR}/exec_audit.jsonl"
-        local vlan_val="${EXEC_VLAN:-null}"
-        local qinq_val="${EXEC_QINQ:+$(printf '"%s"' "${EXEC_QINQ}")}"
-        qinq_val="${qinq_val:-null}"
-        local cmd_str="${EXEC_CMD[*]}"
-        cmd_str="${cmd_str//\\/\\\\}"
-        cmd_str="${cmd_str//\"/\\\"}"
-        printf '{"timestamp":"%s","command":"%s","exit_code":%d,"datapath_profile":"%s","vlan":%s,"qinq":%s}\n' \
-            "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")" \
-            "${cmd_str}" \
-            "${child_exit}" \
-            "${datapath_profile}" \
-            "${vlan_val}" \
-            "${qinq_val}" >> "${audit_log}" 2>/dev/null || true
+        if [[ -L "${audit_log}" ]]; then
+            log_err "Security violation: Audit log '${audit_log}' cannot be a symlink!"
+            _cleanup_exec
+            exit 1
+        fi
+        python3 -B -c '
+import json, sys
+ts, exit_code_str, profile, vlan_str, qinq_str, log_path = sys.argv[1:7]
+cmd_args = sys.argv[7:]
+vlan_val = int(vlan_str) if vlan_str.isdigit() else None
+qinq_val = qinq_str if qinq_str and qinq_str != "null" else None
+rec = {
+    "timestamp": ts,
+    "command": " ".join(cmd_args),
+    "exit_code": int(exit_code_str),
+    "datapath_profile": profile,
+    "vlan": vlan_val,
+    "qinq": qinq_val
+}
+with open(log_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+' "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")" \
+  "${child_exit}" \
+  "${datapath_profile}" \
+  "${EXEC_VLAN:-null}" \
+  "${EXEC_QINQ:-null}" \
+  "${audit_log}" \
+  "${EXEC_CMD[@]}" 2>/dev/null || true
     fi
 
     _cleanup_exec

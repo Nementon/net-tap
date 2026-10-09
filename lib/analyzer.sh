@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# shellcheck disable=SC2001 # Multiline list indentation formatting using sed is preferred over bash parameter expansion
+# shellcheck disable=SC2001,SC2317,SC2329 # Formatting sed usage; trap handlers executed asynchronously via EXIT/INT/TERM traps
 
 analyze_session() {
     verify_dependencies
@@ -78,6 +78,7 @@ analyze_session() {
 
     # Create temporary consolidated inspection directory
     TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/net-tap-analysis.XXXXXX")
+    # shellcheck disable=SC2317,SC2329 # Asynchronous cleanup handler invoked via trap
     cleanup_analyzer() {
         if [[ "${JSON_OUT:-0}" == "1" ]] && { true >&3; } 2>/dev/null; then
             exec 1>&3

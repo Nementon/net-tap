@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# shellcheck disable=SC2317 # Rollback and trap handlers are executed asynchronously via EXIT/INT/TERM traps
+# shellcheck disable=SC2317,SC2329 # Rollback, signal, and trap handlers are executed asynchronously via EXIT/INT/TERM traps
 
 # --- Function: Comprehensive Physical Link Detection ---
 detect_port_status() {
@@ -1392,6 +1392,7 @@ _exec_supervisor_loop() {
     # Ensure monitor mode is disabled to permit process group management
     set +m
 
+    # shellcheck disable=SC2317,SC2329 # Asynchronous signal handler invoked via trap
     _forward_signal() {
         local sig="$1"
         if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
@@ -1563,6 +1564,7 @@ run_exec() {
     fi
 
     local _cleaned=0
+    # shellcheck disable=SC2317,SC2329 # Asynchronous cleanup handler invoked via trap
     _cleanup_exec() {
         if [[ ${_cleaned} -eq 1 ]]; then
             return 0

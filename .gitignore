@@ -16,4 +16,7 @@ captures/
 __pycache__/
 *.py[cod]
 .coverage
+*.so
+*.dylib
+tests/test_socket_watermark
 .pytest_cache/

@@ -564,8 +564,8 @@ release_lock() {
 usage() {
     local exit_code="${1:-1}"
     cat <<EOF
-Usage: $0 <on|off|status|analyze|probe|list|clean> [options]
-(Note: 'on', 'off', 'probe', and 'clean' require sudo / root privileges)
+Usage: $0 <on|off|status|analyze|probe|exec|list|clean> [options]
+(Note: 'on', 'off', 'probe', 'exec', and 'clean' require sudo / root privileges)
 
 Commands:
   on        Enable tap mode, monitor carrier status, and spawn background capture.
@@ -573,11 +573,12 @@ Commands:
   status    Check interface carrier state (Active/Inactive), link params, and capture stats.
   analyze   Deep-analyze PCAPs and log files in a target directory to deduce network config.
   probe     Execute active, controlled discovery probes with audit logging and rate-limiting.
+  exec      Execute arbitrary third-party command with egress watermarking and optional VLAN tagging.
   list      Enumerate all active net-tap sessions and background captures.
   clean     Reconcile crashed sessions, purge stale locks, and detach dangling filters.
 
 Options:
-  -i, --interface <iface>   Target network interface (required for on, off, status, probe; optional for list, clean).
+  -i, --interface <iface>   Target network interface (required for on, off, status, probe, exec; optional for list, clean).
   -n, --netns <name>        Target Linux network namespace to run the capture in (Linux only).
   -m, --mode <mode>         Operational mode: 'passive' (zero-egress) or 'active' (audit probes permitted).
   -t, --type <type>         Hardware type: 'ethernet' or 'sfp' (default: ${DEFAULT_HW_TYPE}).
@@ -620,9 +621,26 @@ Probe Options (for 'probe' command):
   --timeout <sec>           Probe execution timeout in seconds (default: 5).
   --audit-id <id>           Custom audit identifier for probe correlation (default: auto).
 
+Exec Options (for 'exec' command):
+  -- <cmd> [args...]        Command and arguments to execute through active tap session.
+  --vlan <vid>              Force IEEE 802.1Q VLAN encapsulation (stateful netns by default).
+  --stateless-vlan          Use stateless tc act_vlan push/pop datapath instead of netns (alias: --raw).
+  --qinq <s-tag,c-tag>      Force IEEE 802.1ad QinQ double-tagging (stateless tc act_vlan).
+  --ip <cidr>               Assign static IPv4 address/mask to virtual interface in netns (e.g. 192.168.1.50/24).
+  --ip6 <cidr>              Assign static IPv6 address/prefix to virtual interface in netns.
+  --gateway <ip>            Configure default gateway inside isolated netns (e.g. 192.168.1.1).
+  --pcp <0-7>               IEEE 802.1p Priority Code Point for VLAN tag (default: 7).
+  --dscp <class|num>        Wire watermark DSCP class (e.g. CS7, 0x38; default: CS7).
+  --mark <hex>              Internal firewall watermark value (default: 0x7a9).
+  --auto-baby-giant         Automatically adjust parent physical MTU (1504/1508) to fit 802.1Q tags.
+  --no-drop-privileges      Do not drop root privileges to invoking user (\$SUDO_USER).
+
 Examples:
   sudo $0 on -i eth1 -o /data/trace
   sudo $0 on -i eth1 --mode active -o /data/trace
+  sudo $0 exec -i eth1 -- curl -s http://192.168.1.1
+  sudo $0 exec -i eth1 --vlan 100 --ip 192.168.100.50/24 -- iperf3 -c 192.168.100.1
+  sudo $0 exec -i eth1 --stateless-vlan --vlan 100 -- tcpreplay -i eth1 traffic.pcap
   sudo $0 probe -i eth1 --arp-scan 192.168.1.0/24
   sudo $0 probe -i eth1 --vlan 100 --arp-scan 10.100.1.0/24
   sudo $0 probe -i eth1 --auto-vlans --arp-scan 10.0.0.0/24

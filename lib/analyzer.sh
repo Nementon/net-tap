@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# shellcheck disable=SC2001 # Multiline list indentation formatting using sed is preferred over bash parameter expansion
+# shellcheck disable=SC2001,SC2317,SC2329 # Formatting sed usage; trap handlers executed asynchronously via EXIT/INT/TERM traps
 
 analyze_session() {
     verify_dependencies
@@ -78,6 +78,7 @@ analyze_session() {
 
     # Create temporary consolidated inspection directory
     TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/net-tap-analysis.XXXXXX")
+    # shellcheck disable=SC2317,SC2329 # Asynchronous cleanup handler invoked via trap
     cleanup_analyzer() {
         if [[ "${JSON_OUT:-0}" == "1" ]] && { true >&3; } 2>/dev/null; then
             exec 1>&3
@@ -1363,7 +1364,7 @@ except Exception:
     local audit_files=()
     while IFS= read -r -d $'\0' af; do
         audit_files+=("$af")
-    done < <(find "${target_dir}" -maxdepth 1 -name "*_probe_audit.jsonl" -print0 2>/dev/null | sort -z)
+    done < <(find "${target_dir}" -maxdepth 1 \( -name "*_probe_audit.jsonl" -o -name "exec_audit.jsonl" \) -print0 2>/dev/null | sort -z)
 
     if [[ ${#audit_files[@]} -gt 0 ]]; then
         python3 -B -c '
@@ -1375,12 +1376,41 @@ audit_paths = sys.argv[3:]
 
 audit_files = []
 probes_sent = 0
+exec_sessions = []
+watermarked_egress_frames = 0
+vlan_tagged_frames = {}
 vlans_probed_set = set()
 probed_ips = set()
 probed_types = set()
 
 for p in audit_paths:
-    audit_files.append(os.path.basename(p))
+    bname = os.path.basename(p)
+    audit_files.append(bname)
+    if bname == "exec_audit.jsonl":
+        try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        exec_sessions.append({
+                            "timestamp": str(record.get("timestamp", "")),
+                            "command": str(record.get("command", "")),
+                            "exit_code": int(record.get("exit_code", 0)),
+                            "datapath_profile": str(record.get("datapath_profile", "host")),
+                            "vlan": record.get("vlan") if isinstance(record.get("vlan"), int) else None,
+                            "qinq": str(record.get("qinq")) if record.get("qinq") else None,
+                        })
+                        if record.get("vlan") is not None and isinstance(record.get("vlan"), int):
+                            vlans_probed_set.add(str(record["vlan"]))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        continue
+
     try:
         with open(p, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
@@ -1433,8 +1463,9 @@ current_src_mac = None
 if os.path.exists(dump_path):
     with open(dump_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            # Check for start of new packet (unindented line)
-            if not line.startswith(" ") and not line.startswith("\t"):
+            is_new_pkt = not line.startswith(" ") and not line.startswith("\t")
+            if is_new_pkt:
+                current_pkt_watermarked = False
                 # Extract Ethernet MAC addresses from packet header
                 mac_m = re.search(r"([0-9a-fA-F:]{17})\s+>\s+([0-9a-fA-F:]{17})", line)
                 if mac_m:
@@ -1452,7 +1483,19 @@ if os.path.exists(dump_path):
                 else:
                     current_vlan = "untagged"
 
+                if current_vlan != "untagged":
+                    try:
+                        v_num = str(int(current_vlan.split(",")[0].split("/")[0]))
+                        vlan_tagged_frames[v_num] = vlan_tagged_frames.get(v_num, 0) + 1
+                    except Exception:
+                        pass
+
             pkt_vlan = current_vlan
+
+            # Check for watermarked frames (TOS 0x38 / CS7, Flow Label 0x7a9 / 0x007a9, TC 56)
+            if not current_pkt_watermarked and re.search(r"(tos 0x38|tos 56|class 0x38|tc 56|traffic class 0x38|dscp 56|flowlabel 0x007a9|flowlabel 0x7a9|\[tos 0x38\]|dscp CS7)", line, re.I):
+                watermarked_egress_frames += 1
+                current_pkt_watermarked = True
 
             # Check ARP replies
             arp_match = re.search(r"Reply\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+is-at\s+([0-9a-fA-F:]{17})", line)
@@ -1633,6 +1676,9 @@ result = {
     "audit_files": audit_files,
     "probes_sent": probes_sent,
     "responses_received": responses_received,
+    "watermarked_egress_frames": watermarked_egress_frames,
+    "vlan_tagged_frames": vlan_tagged_frames,
+    "exec_sessions": exec_sessions,
     "vlans_probed": vlans_probed,
     "discovered_hosts": discovered_hosts
 }
@@ -1646,12 +1692,16 @@ with open(out_json, "w", encoding="utf-8") as out_f:
         echo -e "${C_BOLD}======================================================================${C_RESET}"
 
         if [[ -f "${TEMP_DIR}/active_audit.json" ]]; then
-            local p_sent p_resp
+            local p_sent p_resp w_frames
             p_sent=$(grep -o '"probes_sent": [0-9]*' "${TEMP_DIR}/active_audit.json" | awk '{print $2}')
             p_resp=$(grep -o '"responses_received": [0-9]*' "${TEMP_DIR}/active_audit.json" | awk '{print $2}')
+            w_frames=$(grep -o '"watermarked_egress_frames": [0-9]*' "${TEMP_DIR}/active_audit.json" | awk '{print $2}')
             echo -e "  Audit Trail Logs     : ${C_BOLD}${#audit_files[@]}${C_RESET} audit file(s) found in capture dir"
             echo -e "  Probes Transmitted   : ${C_CYAN}${C_BOLD}${p_sent:-0}${C_RESET} packet(s)"
             echo -e "  Responses Received   : ${C_GREEN}${C_BOLD}${p_resp:-0}${C_RESET} packet(s)"
+            if [[ -n "${w_frames}" && "${w_frames}" -gt 0 ]]; then
+                echo -e "  Watermarked Egress   : ${C_GREEN}${C_BOLD}${w_frames}${C_RESET} packet(s)"
+            fi
 
             python3 -B -c '
 import json, sys
@@ -1660,6 +1710,12 @@ try:
     vlans = data.get("vlans_probed", [])
     if vlans:
         print(f"  VLAN Profiles Tested : {sys.argv[2]}{sys.argv[3]}" + ", ".join(vlans) + f"{sys.argv[4]}")
+    execs = data.get("exec_sessions", [])
+    if execs:
+        print(f"\n  {sys.argv[5]}Executed Wrapper Sessions:{sys.argv[4]}")
+        for ex in execs:
+            v_info = f" (VLAN {ex[\"vlan\"]})" if ex.get("vlan") else ""
+            print(f"    -> {sys.argv[3]}{ex[\"command\"]}{sys.argv[4]} [exit: {ex[\"exit_code\"]}, profile: {ex[\"datapath_profile\"]}{v_info}]")
     hosts = data.get("discovered_hosts", [])
     if hosts:
         print(f"\n  {sys.argv[5]}Discovered Responsive Hosts:{sys.argv[4]}")

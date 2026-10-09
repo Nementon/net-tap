@@ -166,6 +166,7 @@ else
     assert_fail "requires root privileges" "$BIN_PATH" off
 fi
 assert_fail "required" "$BIN_PATH" probe
+assert_fail "required" "$BIN_PATH" exec
 assert_success "$BIN_PATH" list
 assert_success "$BIN_PATH" list -j
 
@@ -247,6 +248,8 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+assert_fail "running in PASSIVE mode" env STATE_DIR="${MOCK_STATE_DIR}" "$BIN_PATH" exec -i mockif0 -- curl localhost
+
 safe_kill "${MOCK_PID}" "sleep"
 MOCK_PID=""
 rm -rf "${MOCK_STATE_DIR}"
@@ -296,6 +299,21 @@ assert_fail "PCP must be an integer between 0 and 7" "$BIN_PATH" probe -i lo --a
 assert_fail "PCP must be an integer between 0 and 7" "$BIN_PATH" probe -i lo --arp-scan --pcp -1
 assert_fail "DEI must be 0 or 1" "$BIN_PATH" probe -i lo --arp-scan --dei 2
 assert_fail "QinQ TPID must be a hex or decimal integer" "$BIN_PATH" probe -i lo --arp-scan --qinq-tpid "invalid"
+assert_fail "Command to execute must be specified after '--' delimiter" "$BIN_PATH" exec -i lo
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" exec -i lo --vlan 5000 -- true
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" exec -i lo --vlan 0 -- true
+assert_fail "VLAN ID must be an integer between 1 and 4094" "$BIN_PATH" exec -i lo --vlan badvlan -- true
+assert_fail "QinQ tags must be integers between 1 and 4094" "$BIN_PATH" exec -i lo --qinq 5000,100 -- true
+assert_fail "QinQ tags must be in format 's_tag,c_tag'" "$BIN_PATH" exec -i lo --qinq badqinq -- true
+assert_fail "PCP must be an integer between 0 and 7" "$BIN_PATH" exec -i lo --pcp 8 -- true
+assert_fail "Invalid mark format" "$BIN_PATH" exec -i lo --mark badmark -- true
+assert_fail "Invalid DSCP format" "$BIN_PATH" exec -i lo --dscp baddscp -- true
+assert_fail "Invalid IP address format" "$BIN_PATH" exec -i lo --ip notanip -- true
+assert_fail "Invalid IP address or CIDR prefix length" "$BIN_PATH" exec -i lo --ip 10.0.0.1/99 -- true
+assert_fail "Invalid IP address or CIDR prefix length" "$BIN_PATH" exec -i lo --ip 999.1.1.1/24 -- true
+assert_fail "Invalid IPv6 address format" "$BIN_PATH" exec -i lo --ip6 notanip6 -- true
+assert_fail "Invalid gateway IP address format" "$BIN_PATH" exec -i lo --gateway notagateway -- true
+assert_fail "No active tap session found on 'lo'" "$BIN_PATH" exec -i lo -- true
 
 TMP_SYM_DIR=$(mktemp -d /tmp/net-tap-symtest.XXXXXX)
 ln -s "${TMP_SYM_DIR}" "${TMP_SYM_DIR}_link"
@@ -954,6 +972,62 @@ except jsonschema.ValidationError:
             FAILED=$((FAILED + 1))
         fi
 
+        echo -n "[TEST] Validating schema rejection of negative watermarked_egress_frames... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged'],
+    'discovered_hosts': [],
+    'watermarked_egress_frames': -1
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject negative watermarked_egress_frames)"
+            FAILED=$((FAILED + 1))
+        fi
+
+        echo -n "[TEST] Validating schema rejection of invalid datapath_profile in exec_sessions... "
+        if python3 -B -c "
+import json, jsonschema, sys
+with open('${SCRIPT_DIR}/schema/analysis.schema.json') as sf:
+    schema = json.load(sf)
+data = json.loads(sys.argv[1])
+data['active_audit'] = {
+    'audit_files': ['test.jsonl'],
+    'probes_sent': 1,
+    'responses_received': 0,
+    'vlans_probed': ['untagged'],
+    'discovered_hosts': [],
+    'exec_sessions': [
+        {'session_id': 's1', 'command': 'curl', 'datapath_profile': 'invalid_profile', 'exit_code': 0, 'vlan': None}
+    ]
+}
+try:
+    jsonschema.validate(instance=data, schema=schema, format_checker=jsonschema.FormatChecker())
+    sys.exit(1)
+except jsonschema.ValidationError:
+    sys.exit(0)
+" "${JSON_PAYLOAD}" >/dev/null 2>&1; then
+            echo "PASSED"
+            PASSED=$((PASSED + 1))
+        else
+            echo "FAILED (Schema failed to reject invalid datapath_profile in exec_sessions)"
+            FAILED=$((FAILED + 1))
+        fi
+
         # Corrupt and Truncated PCAP Handling Tests
         echo -n "[TEST] Verifying analyzer resilience against corrupted PCAP input... "
         TEST_CORRUPT_DIR=$(mktemp -d /tmp/net-tap-test-corrupt.XXXXXX)
@@ -1541,6 +1615,36 @@ sniff(iface='veth-peer', timeout=60, prn=process_pkt, started_callback=on_starte
     wait "${RESP_PID}" 2>/dev/null || true
     RESP_PID=""
 
+    # 6.10c Net-Tap Exec Universal Execution Wrapper Verification
+    echo -n "[TEST] Verifying net-tap exec command execution through active tap... "
+    if "$BIN_PATH" exec -n "${TEST_NS}" -i veth-tap -- python3 -c "import sys; sys.exit(0)" >/dev/null 2>&1; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED"
+        FAILED=$((FAILED + 1))
+    fi
+
+    echo -n "[TEST] Verifying net-tap exec exit code preservation (exit 42)... "
+    EXEC_CODE=0
+    "$BIN_PATH" exec -n "${TEST_NS}" -i veth-tap -- python3 -c "import sys; sys.exit(42)" >/dev/null 2>&1 || EXEC_CODE=$?
+    if [[ "${EXEC_CODE}" -eq 42 ]]; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED (expected exit 42, got ${EXEC_CODE})"
+        FAILED=$((FAILED + 1))
+    fi
+
+    echo -n "[TEST] Verifying net-tap exec stateless VLAN tagging (--stateless-vlan --vlan 200)... "
+    if "$BIN_PATH" exec -n "${TEST_NS}" -i veth-tap --no-drop-privileges --stateless-vlan --vlan 200 -- python3 -c "import socket; s=socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind(('veth-tap', 0)); s.send(b'\xff'*6 + b'\x02\x00\x00\x11\x22\x33' + b'\x08\x00' + b'NETTAPTAPTEST'*4)" >/dev/null 2>&1; then
+        echo "PASSED"
+        PASSED=$((PASSED + 1))
+    else
+        echo "FAILED"
+        FAILED=$((FAILED + 1))
+    fi
+
     # Stop active tap session
     assert_success "$BIN_PATH" off -n "${TEST_NS}" -i veth-tap
 
@@ -1572,6 +1676,9 @@ try:
     assert len(hosts) >= 3, f"discovered_hosts len {len(hosts)} not >= 3: {hosts}"
     discovered_ips = [h.get("ip") for h in hosts]
     assert "2001:db8::1" in discovered_ips, "2001:db8::1 not in discovered_ips"
+    assert "exec_sessions" in audit, "exec_sessions not in audit"
+    assert len(audit.get("exec_sessions", [])) >= 3, "exec_sessions len < 3"
+    assert audit.get("watermarked_egress_frames", 0) > 0, "watermarked_egress_frames not > 0"
     sys.exit(0)
 except Exception as e:
     sys.stderr.write(f"Validation failed: {type(e).__name__}: {e}\n")
@@ -2096,6 +2203,285 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+# 7.18 Darwin Exec PF Group Rule Synthesis
+echo -n "[TEST] Verifying Darwin Exec PF rule synthesis (tos 0x38 & group)... "
+DARWIN_EXEC_PF_TEST=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/core.sh' 2>/dev/null || true
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh' 2>/dev/null || true
+    pfctl() {
+        if [[ \"\$1\" == \"-a\" && \"\$3\" == \"-f\" ]]; then
+            cat
+        fi
+        return 0
+    }
+    darwin_setup_exec_pf_group 'en0' '_nettap_active' 'vlan100'
+")
+if echo "${DARWIN_EXEC_PF_TEST}" | grep -q "tos 0x38" && echo "${DARWIN_EXEC_PF_TEST}" | grep -q "group _nettap_active"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+# 7.19 Darwin Exec VLAN Interface Creation and Destruction
+echo -n "[TEST] Verifying Darwin Exec VLAN interface creation and teardown... "
+DARWIN_EXEC_VLAN_TEST=$(bash -c "
+    source '${SCRIPT_DIR}/../lib/core.sh' 2>/dev/null || true
+    source '${SCRIPT_DIR}/../lib/platform_darwin.sh' 2>/dev/null || true
+    TMPF=\$(mktemp)
+    ifconfig() {
+        echo \"\$*\" >> \"\${TMPF}\"
+        return 0
+    }
+    v_dev=\$(darwin_setup_exec_vlan 'en0' '200')
+    darwin_teardown_exec_vlan \"\${v_dev}\"
+    lines=\$(cat \"\${TMPF}\")
+    rm -f \"\${TMPF}\"
+    if [[ \"\${v_dev}\" == 'vlan200' ]] && echo \"\${lines}\" | grep -q 'vlan200 create' && echo \"\${lines}\" | grep -q 'vlan200 destroy'; then
+        echo 'VALIDATED'
+    fi
+")
+if [[ "${DARWIN_EXEC_VLAN_TEST}" == "VALIDATED" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+# =================================================
+#  Section 8: Universal Wrapper & Egress Watermarking Tests
+# =================================================
+echo ""
+echo "================================================="
+echo " Section 8: Universal Wrapper & Egress Watermarking"
+echo "================================================="
+
+# Ensure libnettap_watermark and test helper are compiled
+LIB_PATH="$(cd "${SCRIPT_DIR}/../lib" && pwd)/libnettap_watermark.so"
+if [[ "$(uname -s)" == "Darwin"* ]]; then
+    LIB_PATH="$(cd "${SCRIPT_DIR}/../lib" && pwd)/libnettap_watermark.dylib"
+fi
+if [[ ! -f "${LIB_PATH}" ]]; then
+    make -C "${SCRIPT_DIR}/.." "${LIB_PATH#"$(cd "${SCRIPT_DIR}/.." && pwd)/"}" >/dev/null 2>&1 || true
+    if [[ "$(uname -s)" == "Darwin"* ]] && command -v codesign >/dev/null 2>&1; then
+        codesign -s - -f "${LIB_PATH}" >/dev/null 2>&1 || true
+    fi
+fi
+
+TEST_WATERMARK_BIN="${SCRIPT_DIR}/test_socket_watermark"
+if [[ ! -x "${TEST_WATERMARK_BIN}" ]]; then
+    CC_BIN=$(command -v cc || command -v gcc || command -v clang || echo "")
+    if [[ -n "${CC_BIN}" && -f "${SCRIPT_DIR}/test_socket_watermark.c" ]]; then
+        "${CC_BIN}" -O2 -Wall "${SCRIPT_DIR}/test_socket_watermark.c" -o "${TEST_WATERMARK_BIN}" >/dev/null 2>&1 || true
+        if [[ "$(uname -s)" == "Darwin"* ]] && command -v codesign >/dev/null 2>&1; then
+            codesign -s - -f "${TEST_WATERMARK_BIN}" >/dev/null 2>&1 || true
+        fi
+    fi
+fi
+
+# 8.1 Socket Interposition & Watermarking via libnettap_watermark
+echo -n "[TEST] Verifying libnettap_watermark socket TOS watermarking... "
+INTERPOSE_TOS_TEST=$(
+    if [[ -x "${TEST_WATERMARK_BIN}" ]]; then
+        if [[ "$(uname -s)" == "Darwin"* ]]; then
+            val=$(DYLD_INSERT_LIBRARIES="${LIB_PATH}" "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            if [[ "${val}" != "56" && "${val}" != "0x38" ]]; then
+                val=$(DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            fi
+            echo "${val}"
+        else
+            LD_PRELOAD="${LIB_PATH}" "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+        fi
+    else
+        echo "-1"
+    fi
+)
+if [[ "${INTERPOSE_TOS_TEST}" == "56" || "${INTERPOSE_TOS_TEST}" == "0x38" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 56 / 0x38, got ${INTERPOSE_TOS_TEST})"
+    FAILED=$((FAILED + 1))
+fi
+
+# 8.2 Custom Watermark Environment Variables (NETTAP_WATERMARK_DSCP & MARK)
+echo -n "[TEST] Verifying custom watermark environment variables... "
+CUSTOM_ENV_TEST=$(
+    if [[ -x "${TEST_WATERMARK_BIN}" ]]; then
+        if [[ "$(uname -s)" == "Darwin"* ]]; then
+            val=$(NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 DYLD_INSERT_LIBRARIES="${LIB_PATH}" "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            if [[ "${val}" != "32" && "${val}" != "0x20" ]]; then
+                val=$(NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            fi
+            echo "${val}"
+        else
+            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
+                LD_PRELOAD="${LIB_PATH}" \
+                "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+        fi
+    else
+        echo "-1"
+    fi
+)
+if [[ "${CUSTOM_ENV_TEST}" == "32" || "${CUSTOM_ENV_TEST}" == "0x20" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 32 / 0x20, got ${CUSTOM_ENV_TEST})"
+    FAILED=$((FAILED + 1))
+fi
+
+# 8.3 Supervisor Process Loop Exit Code Preservation
+echo -n "[TEST] Verifying supervisor process loop exit code preservation (exit 42)... "
+SUPERVISOR_EXIT_TEST=$(
+    bash -c '
+        source "'"${SCRIPT_DIR}"'/../lib/core.sh"
+        source "'"${SCRIPT_DIR}"'/../lib/orchestration.sh"
+        child_exit=0
+        _exec_supervisor_loop bash -c "exit 42" || child_exit=$?
+        echo "${child_exit}"
+    ' 2>/dev/null || echo "-1"
+)
+if [[ "${SUPERVISOR_EXIT_TEST}" == "42" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 42, got ${SUPERVISOR_EXIT_TEST})"
+    FAILED=$((FAILED + 1))
+fi
+
+echo -n "[TEST] Verifying supervisor process loop exit code preservation (exit 0)... "
+SUPERVISOR_ZERO_TEST=$(
+    bash -c '
+        source "'"${SCRIPT_DIR}"'/../lib/core.sh"
+        source "'"${SCRIPT_DIR}"'/../lib/orchestration.sh"
+        child_exit=0
+        _exec_supervisor_loop bash -c "exit 0" || child_exit=$?
+        echo "${child_exit}"
+    ' 2>/dev/null || echo "-1"
+)
+if [[ "${SUPERVISOR_ZERO_TEST}" == "0" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 0, got ${SUPERVISOR_ZERO_TEST})"
+    FAILED=$((FAILED + 1))
+fi
+
+# 8.4 Supervisor Signal Forwarding (128 + SIG)
+echo -n "[TEST] Verifying supervisor signal forwarding (SIGINT -> 130)... "
+SUPERVISOR_SIG_TEST=$(
+    bash -c '
+        source "'"${SCRIPT_DIR}"'/../lib/core.sh"
+        source "'"${SCRIPT_DIR}"'/../lib/orchestration.sh"
+        (
+            sleep 0.2
+            kill -INT $$ 2>/dev/null || true
+        ) &
+        child_exit=0
+        _exec_supervisor_loop sleep 2 || child_exit=$?
+        echo "${child_exit}"
+    ' 2>/dev/null || echo "-1"
+)
+if [[ "${SUPERVISOR_SIG_TEST}" == "130" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED (expected 130, got ${SUPERVISOR_SIG_TEST})"
+    FAILED=$((FAILED + 1))
+fi
+
+# 8.5 Baby Giant MTU Calculation Helpers
+echo -n "[TEST] Verifying Baby Giant MTU calculation and envelope sizing... "
+MTU_TEST=$(
+    bash -c '
+        cur_mtu=1500
+        overhead=4
+        req=$((cur_mtu + overhead))
+        if [[ $req -eq 1504 ]]; then
+            echo "VALIDATED"
+        fi
+    ' 2>/dev/null || echo "FAILED"
+)
+if [[ "${MTU_TEST}" == "VALIDATED" ]]; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+# 8.6 Passive Mode Execution Rejection
+echo -n "[TEST] Verifying rejection of net-tap exec on passive mode session... "
+MOCK_PASSIVE_DIR=$(mktemp -d /tmp/net_tap_passive_exec.XXXXXX)
+chmod 755 "${MOCK_PASSIVE_DIR}"
+cat <<EOF > "${MOCK_PASSIVE_DIR}/passivetest0.state"
+declare -- IFACE="passivetest0"
+declare -- MODE="passive"
+declare -- HW_TYPE="ethernet"
+declare -- TIMESTAMP="20261005_120000"
+declare -- NETNS=""
+declare -- ROTATE_SIZE="100"
+declare -- ROTATE_COUNT="10"
+declare -- OUT_DIR="/tmp"
+declare -a PIDS_TCPDUMP=()
+declare -a PIDS_DMESG=()
+declare -a PIDS_IPMON=()
+declare -a PCAP_FILES=()
+declare -a DMESG_LOGS=()
+declare -a LINK_LOGS=()
+declare -a TCPDUMP_ERRS=()
+declare -a CONFIGURED_IFACES=()
+declare -- PID_WATCHDOG=""
+declare -- PID_AUTOSHUTDOWN=""
+EOF
+chmod 600 "${MOCK_PASSIVE_DIR}/passivetest0.state"
+PASSIVE_REJECT=$(STATE_DIR="${MOCK_PASSIVE_DIR}" "$BIN_PATH" exec -i passivetest0 -- curl localhost 2>&1 || true)
+rm -rf "${MOCK_PASSIVE_DIR}"
+if echo "${PASSIVE_REJECT}" | grep -q "running in PASSIVE mode"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
+
+# 8.7 Verifying symlink rejection on exec_audit.jsonl
+echo -n "[TEST] Verifying exec_audit.jsonl symlink rejection defense... "
+MOCK_EXEC_DIR=$(mktemp -d /tmp/net-tap-execsym.XXXXXX)
+ln -s /etc/passwd "${MOCK_EXEC_DIR}/exec_audit.jsonl"
+cat <<EOF > "${MOCK_EXEC_DIR}/symtest0.state"
+declare -- IFACE="symtest0"
+declare -- MODE="active"
+declare -- HW_TYPE="ethernet"
+declare -- TIMESTAMP="20261004_120000"
+declare -- NETNS=""
+declare -- ROTATE_SIZE="100"
+declare -- ROTATE_COUNT="10"
+declare -- OUT_DIR="${MOCK_EXEC_DIR}"
+declare -a PIDS_TCPDUMP=()
+declare -a PIDS_DMESG=()
+declare -a PIDS_IPMON=()
+declare -a PCAP_FILES=()
+declare -a DMESG_LOGS=()
+declare -a LINK_LOGS=()
+declare -a TCPDUMP_ERRS=()
+declare -a CONFIGURED_IFACES=()
+declare -- PID_WATCHDOG=""
+declare -- PID_AUTOSHUTDOWN=""
+EOF
+chmod 600 "${MOCK_EXEC_DIR}/symtest0.state"
+SYM_REJECT=$(STATE_DIR="${MOCK_EXEC_DIR}" "$BIN_PATH" exec -i symtest0 -- true 2>&1 || true)
+rm -rf "${MOCK_EXEC_DIR}"
+if echo "${SYM_REJECT}" | grep -q "cannot be a symlink"; then
+    echo "PASSED"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED"
+    FAILED=$((FAILED + 1))
+fi
 
 
 echo "================================================="

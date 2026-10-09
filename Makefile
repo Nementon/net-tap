@@ -24,9 +24,15 @@ all: $(WATERMARK_LIB) $(TEST_WATERMARK_BIN) lint
 
 $(WATERMARK_LIB): lib/libnettap_watermark.c
 	$(CC) $(CFLAGS) -O2 -Wall -Wextra $(CFLAGS_SHARED) $< -o $@ $(LDFLAGS_SHARED)
+	@if [ "$$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then \
+		codesign -s - -f $@ 2>/dev/null || true; \
+	fi
 
 $(TEST_WATERMARK_BIN): tests/test_socket_watermark.c
 	$(CC) $(CFLAGS) -O2 -Wall $< -o $@
+	@if [ "$$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then \
+		codesign -s - -f $@ 2>/dev/null || true; \
+	fi
 
 install: $(WATERMARK_LIB)
 	install -d $(DESTDIR)$(BINDIR)

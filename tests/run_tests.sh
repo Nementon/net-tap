@@ -2259,12 +2259,15 @@ echo " Section 8: Universal Wrapper & Egress Watermarking"
 echo "================================================="
 
 # Ensure libnettap_watermark and test helper are compiled
-LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.so"
+LIB_PATH="$(cd "${SCRIPT_DIR}/../lib" && pwd)/libnettap_watermark.so"
 if [[ "$(uname -s)" == "Darwin"* ]]; then
-    LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.dylib"
+    LIB_PATH="$(cd "${SCRIPT_DIR}/../lib" && pwd)/libnettap_watermark.dylib"
 fi
 if [[ ! -f "${LIB_PATH}" ]]; then
-    make -C "${SCRIPT_DIR}/.." "${LIB_PATH#"${SCRIPT_DIR}/../"}" >/dev/null 2>&1 || true
+    make -C "${SCRIPT_DIR}/.." "${LIB_PATH#"$(cd "${SCRIPT_DIR}/.." && pwd)/"}" >/dev/null 2>&1 || true
+    if [[ "$(uname -s)" == "Darwin"* ]] && command -v codesign >/dev/null 2>&1; then
+        codesign -s - -f "${LIB_PATH}" >/dev/null 2>&1 || true
+    fi
 fi
 
 TEST_WATERMARK_BIN="${SCRIPT_DIR}/test_socket_watermark"
@@ -2272,6 +2275,9 @@ if [[ ! -x "${TEST_WATERMARK_BIN}" ]]; then
     CC_BIN=$(command -v cc || command -v gcc || command -v clang || echo "")
     if [[ -n "${CC_BIN}" && -f "${SCRIPT_DIR}/test_socket_watermark.c" ]]; then
         "${CC_BIN}" -O2 -Wall "${SCRIPT_DIR}/test_socket_watermark.c" -o "${TEST_WATERMARK_BIN}" >/dev/null 2>&1 || true
+        if [[ "$(uname -s)" == "Darwin"* ]] && command -v codesign >/dev/null 2>&1; then
+            codesign -s - -f "${TEST_WATERMARK_BIN}" >/dev/null 2>&1 || true
+        fi
     fi
 fi
 
@@ -2280,24 +2286,16 @@ echo -n "[TEST] Verifying libnettap_watermark socket TOS watermarking... "
 INTERPOSE_TOS_TEST=$(
     if [[ -x "${TEST_WATERMARK_BIN}" ]]; then
         if [[ "$(uname -s)" == "Darwin"* ]]; then
-            DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+            val=$(DYLD_INSERT_LIBRARIES="${LIB_PATH}" "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            if [[ "${val}" != "56" && "${val}" != "0x38" ]]; then
+                val=$(DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            fi
+            echo "${val}"
         else
             LD_PRELOAD="${LIB_PATH}" "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
         fi
     else
-        if [[ "$(uname -s)" == "Darwin"* ]]; then
-            DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -B -c '
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
-' 2>/dev/null || echo "-1"
-        else
-            LD_PRELOAD="${LIB_PATH}" python3 -B -c '
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
-' 2>/dev/null || echo "-1"
-        fi
+        echo "-1"
     fi
 )
 if [[ "${INTERPOSE_TOS_TEST}" == "56" || "${INTERPOSE_TOS_TEST}" == "0x38" ]]; then
@@ -2313,32 +2311,18 @@ echo -n "[TEST] Verifying custom watermark environment variables... "
 CUSTOM_ENV_TEST=$(
     if [[ -x "${TEST_WATERMARK_BIN}" ]]; then
         if [[ "$(uname -s)" == "Darwin"* ]]; then
-            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
-                DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 \
-                "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+            val=$(NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 DYLD_INSERT_LIBRARIES="${LIB_PATH}" "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            if [[ "${val}" != "32" && "${val}" != "0x20" ]]; then
+                val=$(NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1")
+            fi
+            echo "${val}"
         else
             NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
                 LD_PRELOAD="${LIB_PATH}" \
                 "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
         fi
     else
-        if [[ "$(uname -s)" == "Darwin"* ]]; then
-            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
-                DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 \
-                python3 -B -c '
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
-' 2>/dev/null || echo "-1"
-        else
-            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
-                LD_PRELOAD="${LIB_PATH}" \
-                python3 -B -c '
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
-' 2>/dev/null || echo "-1"
-        fi
+        echo "-1"
     fi
 )
 if [[ "${CUSTOM_ENV_TEST}" == "32" || "${CUSTOM_ENV_TEST}" == "0x20" ]]; then

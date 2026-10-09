@@ -48,6 +48,9 @@
 #endif
 
 #if defined(__APPLE__)
+#if __has_include(<mach-o/dyld-interposing.h>)
+#include <mach-o/dyld-interposing.h>
+#else
 #define DYLD_INTERPOSE(_replacement, _replacee) \
     __attribute__((used)) static const struct { \
         const void* replacement; \
@@ -57,8 +60,13 @@
         (const void*)(unsigned long)&_replacee \
     };
 #endif
+#endif
 
+#if defined(__APPLE__)
+static int (*real_socket)(int domain, int type, int protocol) = socket;
+#else
 static int (*real_socket)(int domain, int type, int protocol) = NULL;
+#endif
 static __thread int in_socket_interpose = 0;
 
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
@@ -69,18 +77,17 @@ static unsigned int g_bound_ifindex = 0;
 static int g_verbose = 0;
 
 static void init_watermark(void) {
-    /* Resolve libc real socket() symbol */
+#if !defined(__APPLE__)
+    /* Resolve libc real socket() symbol on Linux */
     real_socket = (int (*)(int, int, int))dlsym(RTLD_NEXT, "socket");
-#if defined(__APPLE__)
-    if (!real_socket) {
-        real_socket = (int (*)(int, int, int))dlsym(RTLD_DEFAULT, "socket");
-    }
-#endif
     if (!real_socket) {
         char *err = dlerror();
         fprintf(stderr, "[net-tap-watermark] FATAL: dlsym(RTLD_NEXT, \"socket\") failed: %s\n", err ? err : "unknown");
         abort();
     }
+#else
+    real_socket = socket;
+#endif
 
     const char *env_mark = getenv("NETTAP_WATERMARK_MARK");
     if (env_mark && *env_mark) {
@@ -113,7 +120,11 @@ static void init_watermark(void) {
 static int nettap_interposed_socket(int domain, int type, int protocol) {
     if (in_socket_interpose) {
         if (!real_socket) {
+#if defined(__APPLE__)
+            real_socket = socket;
+#else
             real_socket = (int (*)(int, int, int))dlsym(RTLD_NEXT, "socket");
+#endif
         }
         return real_socket ? real_socket(domain, type, protocol) : -1;
     }
@@ -122,7 +133,7 @@ static int nettap_interposed_socket(int domain, int type, int protocol) {
     pthread_once(&g_init_once, init_watermark);
 
     int saved_errno = 0;
-    int fd = real_socket(domain, type, protocol);
+    int fd = real_socket ? real_socket(domain, type, protocol) : -1;
     if (fd < 0) {
         in_socket_interpose = 0;
         return fd;
@@ -188,8 +199,8 @@ static int nettap_dyld_socket(int domain, int type, int protocol) {
     return nettap_interposed_socket(domain, type, protocol);
 }
 DYLD_INTERPOSE(nettap_dyld_socket, socket);
-#endif
-
+#else
 int socket(int domain, int type, int protocol) {
     return nettap_interposed_socket(domain, type, protocol);
 }
+#endif

@@ -2258,73 +2258,94 @@ echo "================================================="
 echo " Section 8: Universal Wrapper & Egress Watermarking"
 echo "================================================="
 
+# Ensure libnettap_watermark and test helper are compiled
+LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.so"
+if [[ "$(uname -s)" == "Darwin"* ]]; then
+    LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.dylib"
+fi
+if [[ ! -f "${LIB_PATH}" ]]; then
+    make -C "${SCRIPT_DIR}/.." "${LIB_PATH#"${SCRIPT_DIR}/../"}" >/dev/null 2>&1 || true
+fi
+
+TEST_WATERMARK_BIN="${SCRIPT_DIR}/test_socket_watermark"
+if [[ ! -x "${TEST_WATERMARK_BIN}" ]]; then
+    CC_BIN=$(command -v cc || command -v gcc || command -v clang || echo "")
+    if [[ -n "${CC_BIN}" && -f "${SCRIPT_DIR}/test_socket_watermark.c" ]]; then
+        "${CC_BIN}" -O2 -Wall "${SCRIPT_DIR}/test_socket_watermark.c" -o "${TEST_WATERMARK_BIN}" >/dev/null 2>&1 || true
+    fi
+fi
+
 # 8.1 Socket Interposition & Watermarking via libnettap_watermark
 echo -n "[TEST] Verifying libnettap_watermark socket TOS watermarking... "
 INTERPOSE_TOS_TEST=$(
-    LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.so"
-    if [[ "$(uname -s)" == "Darwin"* ]]; then
-        LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.dylib"
-        env DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -B -c '
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-tos = s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS)
-if tos == 0x38:
-    print("SUCCESS")
-else:
-    print(f"FAILED: {tos}")
-' 2>/dev/null || echo "FAILED"
+    if [[ -x "${TEST_WATERMARK_BIN}" ]]; then
+        if [[ "$(uname -s)" == "Darwin"* ]]; then
+            DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+        else
+            LD_PRELOAD="${LIB_PATH}" "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+        fi
     else
-        env LD_PRELOAD="${LIB_PATH}" python3 -B -c '
-import socket, sys
+        if [[ "$(uname -s)" == "Darwin"* ]]; then
+            DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 python3 -B -c '
+import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-tos = s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS)
-if tos == 0x38:
-    print("SUCCESS")
-else:
-    print(f"FAILED: {tos}")
-' 2>/dev/null || echo "FAILED"
+print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
+' 2>/dev/null || echo "-1"
+        else
+            LD_PRELOAD="${LIB_PATH}" python3 -B -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
+' 2>/dev/null || echo "-1"
+        fi
     fi
 )
-if [[ "${INTERPOSE_TOS_TEST}" == "SUCCESS" ]]; then
+if [[ "${INTERPOSE_TOS_TEST}" == "56" || "${INTERPOSE_TOS_TEST}" == "0x38" ]]; then
     echo "PASSED"
     PASSED=$((PASSED + 1))
 else
-    echo "FAILED"
+    echo "FAILED (expected 56 / 0x38, got ${INTERPOSE_TOS_TEST})"
     FAILED=$((FAILED + 1))
 fi
 
 # 8.2 Custom Watermark Environment Variables (NETTAP_WATERMARK_DSCP & MARK)
 echo -n "[TEST] Verifying custom watermark environment variables... "
 CUSTOM_ENV_TEST=$(
-    LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.so"
-    if [[ "$(uname -s)" == "Darwin"* ]]; then
-        LIB_PATH="${SCRIPT_DIR}/../lib/libnettap_watermark.dylib"
-        env DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 python3 -B -c '
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-tos = s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS)
-if tos == 0x20:
-    print("SUCCESS")
-else:
-    print(f"FAILED: {tos}")
-' 2>/dev/null || echo "FAILED"
+    if [[ -x "${TEST_WATERMARK_BIN}" ]]; then
+        if [[ "$(uname -s)" == "Darwin"* ]]; then
+            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
+                DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 \
+                "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+        else
+            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
+                LD_PRELOAD="${LIB_PATH}" \
+                "${TEST_WATERMARK_BIN}" 2>/dev/null || echo "-1"
+        fi
     else
-        env LD_PRELOAD="${LIB_PATH}" NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 python3 -B -c '
+        if [[ "$(uname -s)" == "Darwin"* ]]; then
+            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
+                DYLD_INSERT_LIBRARIES="${LIB_PATH}" DYLD_FORCE_FLAT_NAMESPACE=1 \
+                python3 -B -c '
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-tos = s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS)
-if tos == 0x20:
-    print("SUCCESS")
-else:
-    print(f"FAILED: {tos}")
-' 2>/dev/null || echo "FAILED"
+print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
+' 2>/dev/null || echo "-1"
+        else
+            NETTAP_WATERMARK_DSCP=0x20 NETTAP_WATERMARK_MARK=0x42 \
+                LD_PRELOAD="${LIB_PATH}" \
+                python3 -B -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+print(s.getsockopt(socket.IPPROTO_IP, socket.IP_TOS))
+' 2>/dev/null || echo "-1"
+        fi
     fi
 )
-if [[ "${CUSTOM_ENV_TEST}" == "SUCCESS" ]]; then
+if [[ "${CUSTOM_ENV_TEST}" == "32" || "${CUSTOM_ENV_TEST}" == "0x20" ]]; then
     echo "PASSED"
     PASSED=$((PASSED + 1))
 else
-    echo "FAILED"
+    echo "FAILED (expected 32 / 0x20, got ${CUSTOM_ENV_TEST})"
     FAILED=$((FAILED + 1))
 fi
 

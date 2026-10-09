@@ -18,4 +18,5 @@ __pycache__/
 .coverage
 *.so
 *.dylib
+tests/test_socket_watermark
 .pytest_cache/

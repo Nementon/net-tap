@@ -4,7 +4,7 @@
  *
  * Supported Platforms:
  *   - Linux: glibc/musl (LD_PRELOAD)
- *   - macOS Darwin: XNU/dyld (DYLD_INSERT_LIBRARIES)
+ *   - macOS Darwin: XNU/dyld (DYLD_INSERT_LIBRARIES / DYLD_INTERPOSE)
  *
  * Capabilities:
  *   1. Stamping Linux kernel firewall mark (SO_MARK 0x7a9).
@@ -47,6 +47,17 @@
 #define IPV6_TCLASS 67
 #endif
 
+#if defined(__APPLE__)
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+    __attribute__((used)) static const struct { \
+        const void* replacement; \
+        const void* replacee; \
+    } _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = { \
+        (const void*)(unsigned long)&_replacement, \
+        (const void*)(unsigned long)&_replacee \
+    };
+#endif
+
 static int (*real_socket)(int domain, int type, int protocol) = NULL;
 static __thread int in_socket_interpose = 0;
 
@@ -60,6 +71,11 @@ static int g_verbose = 0;
 static void init_watermark(void) {
     /* Resolve libc real socket() symbol */
     real_socket = (int (*)(int, int, int))dlsym(RTLD_NEXT, "socket");
+#if defined(__APPLE__)
+    if (!real_socket) {
+        real_socket = (int (*)(int, int, int))dlsym(RTLD_DEFAULT, "socket");
+    }
+#endif
     if (!real_socket) {
         char *err = dlerror();
         fprintf(stderr, "[net-tap-watermark] FATAL: dlsym(RTLD_NEXT, \"socket\") failed: %s\n", err ? err : "unknown");
@@ -94,7 +110,7 @@ static void init_watermark(void) {
     }
 }
 
-int socket(int domain, int type, int protocol) {
+static int nettap_interposed_socket(int domain, int type, int protocol) {
     if (in_socket_interpose) {
         if (!real_socket) {
             real_socket = (int (*)(int, int, int))dlsym(RTLD_NEXT, "socket");
@@ -165,4 +181,15 @@ int socket(int domain, int type, int protocol) {
     errno = saved_errno;
     in_socket_interpose = 0;
     return fd;
+}
+
+#if defined(__APPLE__)
+static int nettap_dyld_socket(int domain, int type, int protocol) {
+    return nettap_interposed_socket(domain, type, protocol);
+}
+DYLD_INTERPOSE(nettap_dyld_socket, socket);
+#endif
+
+int socket(int domain, int type, int protocol) {
+    return nettap_interposed_socket(domain, type, protocol);
 }

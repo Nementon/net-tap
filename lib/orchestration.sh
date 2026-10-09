@@ -1635,16 +1635,6 @@ run_exec() {
             fi
         fi
         runner_cmd+=(NETTAP_WATERMARK_MARK="${EXEC_MARK}" NETTAP_WATERMARK_DSCP="${dscp_val}")
-    else
-        runner_cmd+=(env)
-        if [[ -n "${watermark_lib}" ]]; then
-            if [[ "${PLATFORM:-linux}" == "darwin" ]]; then
-                runner_cmd+=(DYLD_INSERT_LIBRARIES="${watermark_lib}" DYLD_FORCE_FLAT_NAMESPACE=1)
-            else
-                runner_cmd+=(LD_PRELOAD="${watermark_lib}")
-            fi
-        fi
-        runner_cmd+=(NETTAP_WATERMARK_MARK="${EXEC_MARK}" NETTAP_WATERMARK_DSCP="${dscp_val}")
     fi
 
     runner_cmd+=("${EXEC_CMD[@]}")
